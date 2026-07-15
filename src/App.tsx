@@ -240,6 +240,15 @@ function profileAvatarUrl(path: string | null) {
   return path && supabase ? supabase.storage.from('avatars').getPublicUrl(path).data.publicUrl : null
 }
 
+function blobAsDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Unable to read file'))
+    reader.onerror = () => reject(reader.error || new Error('Unable to read file'))
+    reader.readAsDataURL(blob)
+  })
+}
+
 async function resolveWithin<T>(promise: PromiseLike<T>, timeoutMs = 7000): Promise<T> {
   let timer = 0
   try {
@@ -559,7 +568,14 @@ export default function App() {
 
   const loadMessages = useCallback(async (conversationId: string) => {
     if (conversationId === favoritesConversationId) {
-      try { setMessages(JSON.parse(window.localStorage.getItem(favoritesStorageKey(currentUserId || 'guest')) || '[]') as Message[]) } catch { setMessages([]) }
+      try {
+        const localMessages = JSON.parse(window.localStorage.getItem(favoritesStorageKey(currentUserId || 'guest')) || '[]') as Message[]
+        setMessages(localMessages)
+        setMessageImageUrls(Object.fromEntries(localMessages.flatMap((message) => {
+          const source = message.image_path || message.audio_path
+          return source?.startsWith('data:') ? [[message.id, source]] : []
+        })))
+      } catch { setMessages([]) }
       setPinnedMessage(null)
       return
     }
@@ -1176,10 +1192,31 @@ export default function App() {
   }
 
   async function uploadPhoto(file: File) {
-    if (!supabase || !selectedConversation || !currentUserId || photoUploading) return
+    if (!selectedConversation || !currentUserId || photoUploading) return
     setPhotoUploading(true)
     setChatError('')
     const uploadFile = await compressImage(file)
+    if (selectedConversation === favoritesConversationId) {
+      try {
+        const source = await blobAsDataUrl(uploadFile)
+        const message: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body: '', created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: source, image_name: file.name, audio_path: null, audio_name: null, audio_duration: null }
+        setMessages((current) => {
+          const next = [...current, message]
+          window.localStorage.setItem(favoritesStorageKey(currentUserId), JSON.stringify(next))
+          return next
+        })
+        setMessageImageUrls((current) => ({ ...current, [message.id]: source }))
+        setLoadedMessageImages((current) => ({ ...current, [message.id]: true }))
+      } catch {
+        setChatError('Не удалось сохранить фото на этом устройстве.')
+      }
+      setPhotoUploading(false)
+      return
+    }
+    if (!supabase) {
+      setPhotoUploading(false)
+      return
+    }
     const safeName = uploadFile.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-120) || 'image'
     const path = `${selectedConversation}/${currentUserId}/${crypto.randomUUID()}-${safeName}`
     const { error: uploadError } = await supabase.storage.from('chat-media').upload(path, uploadFile, {
@@ -1340,8 +1377,24 @@ export default function App() {
   }
 
   async function uploadVoice(blob: Blob, duration: number) {
-    if (!supabase || !selectedConversation || !currentUserId || !blob.size) return
+    if (!selectedConversation || !currentUserId || !blob.size) return
     const extension = blob.type.includes('ogg') ? 'ogg' : 'webm'
+    if (selectedConversation === favoritesConversationId) {
+      try {
+        const source = await blobAsDataUrl(blob)
+        const message: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body: '', created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: null, image_name: null, audio_path: source, audio_name: `Голосовое.${extension}`, audio_duration: Math.max(1, duration) }
+        setMessages((current) => {
+          const next = [...current, message]
+          window.localStorage.setItem(favoritesStorageKey(currentUserId), JSON.stringify(next))
+          return next
+        })
+        setMessageImageUrls((current) => ({ ...current, [message.id]: source }))
+      } catch {
+        setChatError('Не удалось сохранить голосовое на этом устройстве.')
+      }
+      return
+    }
+    if (!supabase) return
     const path = `${selectedConversation}/${currentUserId}/${crypto.randomUUID()}-voice.${extension}`
     const { error: uploadError } = await supabase.storage.from('chat-media').upload(path, blob, { cacheControl: '31536000', contentType: blob.type || 'audio/webm', upsert: false })
     if (uploadError) {
