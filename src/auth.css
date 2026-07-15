@@ -1,0 +1,23 @@
+/* The auth view must fully conceal the app until the user signs in. */
+.welcome-overlay {
+  background: #101714 !important;
+  backdrop-filter: none;
+}
+
+.welcome-card {
+  background: #1b2821;
+  backdrop-filter: none;
+}
+
+body {
+  background: #101714;
+}
+
+.auth-switch {
+  margin-top: 15px;
+  padding: 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+  color: #9ec9a9 !important;
+  font-size: 11px !important;
+}

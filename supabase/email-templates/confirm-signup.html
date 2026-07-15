@@ -1,0 +1,8 @@
+<div style="max-width:520px;margin:0 auto;padding:36px 28px;background:#101714;color:#edf2ed;font-family:Arial,sans-serif;border-radius:20px">
+  <p style="margin:0 0 24px;color:#8fb79a;font-size:12px;letter-spacing:2px">OSIRIUM</p>
+  <h1 style="margin:0 0 18px;font-size:24px;color:#ffffff">Привет, @{{ .Data.username }}!</h1>
+  <p style="margin:0 0 14px;line-height:1.55;color:#c1cbc3">Вы хотите подтвердить эту почту для входа в Osirium?</p>
+  <p style="margin:24px 0 8px;color:#c1cbc3">Вот ваш код:</p>
+  <div style="padding:16px;background:#28533e;border-radius:14px;color:#ffffff;font-size:28px;font-weight:700;letter-spacing:6px;text-align:center">{{ .Token }}</div>
+  <p style="margin:24px 0 0;font-size:12px;line-height:1.5;color:#87948b">Не передавайте код другим. Если это были не вы, просто проигнорируйте письмо.</p>
+</div>
