@@ -67,3 +67,4 @@ button:not(:disabled):active,.chat-row:active,.contact-card:active{transform:sca
 }
 .mobile-page-back{display:none}.sidebar-error{margin:8px 8px 0;color:#efa9a9;font-size:12px;line-height:1.45}.chat-row:disabled{opacity:.72;cursor:wait}
 @media (max-width:720px){.mobile-page-back{display:inline-flex;align-items:center;align-self:flex-start;margin:0 0 20px;padding:0;border:0;background:transparent;color:#ededed;font:700 12px Manrope,Arial,sans-serif;cursor:pointer}.mobile-page-back:active{opacity:.65}}
+@media (max-width:720px){.app-shell.mobile-settings-open .sidebar{display:none!important}.app-shell.mobile-settings-open .conversation{display:flex!important;width:100%;height:100%}.app-shell.mobile-settings-open .settings-view{display:flex!important}}
