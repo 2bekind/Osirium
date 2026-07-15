@@ -846,7 +846,13 @@ export default function App() {
     })
     setAuthLoading(false)
     if (error || !data?.session) {
-      const message = error?.message || data?.error || 'Не удалось выполнить вход.'
+      let functionMessage: string | undefined
+      const response = error && typeof error === 'object' && 'context' in error ? (error as { context?: Response }).context : undefined
+      if (response) {
+        const body = await response.clone().json().catch(() => null) as { error?: string } | null
+        functionMessage = body?.error
+      }
+      const message = functionMessage || data?.error || error?.message || 'Не удалось выполнить вход.'
       setAuthError(message === 'Invalid login credentials'
         ? 'Логин или пароль неверны. Если вы здесь впервые, создайте аккаунт.'
         : message)
