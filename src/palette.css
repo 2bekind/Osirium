@@ -46,3 +46,22 @@ button:not(:disabled):active,.chat-row:active,.contact-card:active{transform:sca
 
 /* Comfortable touch layout */
 @media (max-width:720px){html,body,#root{width:100%;height:100%;overflow:hidden}.app-shell{height:100dvh!important;min-height:100dvh;overscroll-behavior:none}.sidebar{width:100%;height:100%;padding:20px 14px calc(12px + env(safe-area-inset-bottom));border:0}.conversation{display:none!important;width:100%;height:100%;min-height:0}.conversation.is-open{display:flex!important}.app-shell:has(.conversation.is-open) .sidebar,.app-shell:has(.osi-page) .sidebar,.app-shell:has(.admin-page) .sidebar{display:none}.app-shell:has(.osi-page) .osi-page,.app-shell:has(.admin-page) .admin-page{display:flex!important;width:100%;height:100%}.conversation-head{height:66px;padding:0 14px;gap:10px}.mobile-menu{display:grid;width:38px;height:38px;border-radius:13px}.conversation-head .call-button{margin-left:auto}.messages{padding:18px 14px 12px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.bubble-wrap{margin-bottom:9px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}.bubble{max-width:86%;font-size:14px;line-height:1.5}.composer{height:66px;padding:0 12px calc(env(safe-area-inset-bottom));gap:7px}.composer input{height:44px;font-size:16px}.composer-action{width:38px;height:38px;flex-basis:38px}.send{width:42px;height:42px;flex:0 0 42px}.bottom-nav button,.chat-row,.icon-button,.composer-action,.send,.message-menu button,.pinned-message{-webkit-tap-highlight-color:transparent;touch-action:manipulation}.chat-row{min-height:66px;padding:10px 8px}.search{height:48px;margin-bottom:10px}.message-menu{min-width:226px}.message-menu-layer{touch-action:manipulation}.image-viewer{padding:22px}.image-viewer>img{max-height:calc(100vh - 68px)}.profile-view{padding:25px 20px;overflow:auto}.settings-view{overflow:auto;padding:28px 20px calc(30px + env(safe-area-inset-bottom))}.settings-menu{padding:8px 4px}.app-lock-card{padding:34px 24px 27px}.welcome-card{max-height:calc(100dvh - 32px);overflow:auto}}
+
+/* Phone layout: no fixed desktop widths or horizontal overflow. */
+@media (max-width:720px){
+  html,body,#root,.app-shell{min-width:0!important;max-width:100%!important}
+  .app-shell{display:block!important;width:100%!important;overflow:hidden}
+  .sidebar{box-sizing:border-box;max-width:100vw;overflow-x:hidden;overflow-y:auto;padding:20px 14px calc(16px + env(safe-area-inset-bottom))}
+  .sidebar-head{padding-inline:4px}.sidebar h1{font-size:21px}.settings-menu{width:100%;max-width:100%}
+  .page-view,.settings-view,.profile-view{box-sizing:border-box;min-width:0;max-width:100%;overflow-x:hidden}
+  .page-view{padding:28px 20px calc(28px + env(safe-area-inset-bottom))}.page-view h2{font-size:clamp(26px,8vw,34px);letter-spacing:-1.25px}
+  .settings-description,.profile-form,.privacy-section,.danger-zone,.admin-search-form,.admin-results,.osi-balance-card{width:100%;max-width:100%}
+  .privacy-section{margin-top:22px}.avatar-editor{align-items:flex-start}.avatar-editor>div{min-width:0}
+  .admin-search-form{grid-template-columns:minmax(0,1fr) auto}.admin-search-form .privacy-save{width:auto;min-width:88px}
+  .app-shell:has(.admin-page){display:block!important;height:100dvh;overflow-y:auto!important;overflow-x:hidden}
+  .app-shell:has(.admin-page) .admin-page,.app-shell:has(.admin-page) .admin-page-secondary{display:flex!important;width:100%;height:auto!important;min-height:0;padding:28px 20px!important}
+  .app-shell:has(.admin-page) .admin-page h2{font-size:30px}.app-shell:has(.admin-page) .admin-page-secondary .admin-user{grid-template-columns:minmax(0,1fr) auto;gap:10px}
+  .app-shell:has(.admin-page) .admin-page-secondary .admin-badge-actions{grid-template-columns:78px 116px;gap:4px 6px}.app-shell:has(.admin-page) .admin-page-secondary .osi-amount-input{width:78px}
+  .osi-balance-card{padding:16px}.message-image{max-width:78vw;max-height:55vh}.image-viewer{padding:18px}.image-viewer-close{top:calc(14px + env(safe-area-inset-top));right:16px}
+  .welcome-card{width:calc(100vw - 28px);padding:38px 22px 26px;border-radius:26px}.welcome-card h2{font-size:28px}.app-lock-card{width:calc(100vw - 32px);padding:30px 22px 24px}
+}
