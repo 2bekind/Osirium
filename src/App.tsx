@@ -607,14 +607,12 @@ export default function App() {
       if (lock?.passwordHash && lock.passwordSalt && window.localStorage.getItem(appLockedStorageKey(user.id)) === '1') {
         setAppLocked(true)
       }
-      await loadChats()
-      await loadStories()
-      await loadContacts()
+      await Promise.allSettled([loadChats(), loadStories(), loadContacts()])
       finishBoot()
     }
 
-    void client.auth.getSession().then(({ data }) => hydrate(data.session))
-    const { data: listener } = client.auth.onAuthStateChange((_event, session) => { void hydrate(session) })
+    void client.auth.getSession().then(({ data }) => hydrate(data.session)).catch(finishBoot)
+    const { data: listener } = client.auth.onAuthStateChange((_event, session) => { void hydrate(session).catch(finishBoot) })
     return () => {
       active = false
       listener.subscription.unsubscribe()
