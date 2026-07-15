@@ -62,6 +62,32 @@ type Message = {
   audio_path: string | null
   audio_name: string | null
   audio_duration: number | null
+  reply_to_id?: string | null
+  reply_body?: string | null
+  reply_sender_id?: string | null
+  forwarded_from_id?: string | null
+  edited_at?: string | null
+}
+
+type AdminAudit = {
+  id: string
+  action: 'badge' | 'ban' | 'osi'
+  target_user_id: string
+  username: string
+  display_name: string
+  previous_state: Record<string, unknown>
+  next_state: Record<string, unknown>
+  created_at: string
+  undone_at: string | null
+}
+
+type CallSignal = {
+  call_id: string
+  conversation_id: string
+  sender_id: string
+  recipient_id: string
+  kind: 'offer' | 'answer' | 'ice' | 'hangup' | 'decline'
+  payload: { description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit }
 }
 
 type MessageMenu = {
@@ -258,6 +284,10 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [pinnedMessage, setPinnedMessage] = useState<Message | null>(null)
   const [messageMenu, setMessageMenu] = useState<MessageMenu | null>(null)
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null)
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null)
+  const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null)
+  const [favoritesSearch, setFavoritesSearch] = useState('')
   const [chatMenu, setChatMenu] = useState<ChatMenu | null>(null)
   const [draft, setDraft] = useState('')
   const [showWelcome, setShowWelcome] = useState(false)
@@ -290,6 +320,7 @@ export default function App() {
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminError, setAdminError] = useState('')
   const [osiAmount, setOsiAmount] = useState('100')
+  const [adminAudit, setAdminAudit] = useState<AdminAudit[]>([])
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileError, setProfileError] = useState('')
   const [avatarUploading, setAvatarUploading] = useState(false)
@@ -347,8 +378,13 @@ export default function App() {
   const [openedImage, setOpenedImage] = useState<{ src: string; name: string } | null>(null)
   const [imageScale, setImageScale] = useState(1)
   const [callTarget, setCallTarget] = useState<Chat | null>(null)
-  const [callStatus, setCallStatus] = useState<'calling' | 'microphone-error'>('calling')
+  const [callStatus, setCallStatus] = useState<'calling' | 'incoming' | 'connected' | 'microphone-error'>('calling')
   const callStreamRef = useRef<MediaStream | null>(null)
+  const callPeerRef = useRef<RTCPeerConnection | null>(null)
+  const callIdRef = useRef<string | null>(null)
+  const queuedIceCandidatesRef = useRef<RTCIceCandidateInit[]>([])
+  const incomingOfferRef = useRef<CallSignal | null>(null)
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
   const photoInputRef = useRef<HTMLInputElement>(null)
   const voiceRecorderRef = useRef<MediaRecorder | null>(null)
   const voiceStreamRef = useRef<MediaStream | null>(null)
@@ -370,6 +406,9 @@ export default function App() {
 
   const favoriteChat: Chat | null = currentUserId ? { id: currentUserId, username: 'избранное', display_name: 'Избранное', avatar_color: '#376eb3', avatar_path: null, is_admin: false, badge: null, is_banned: false, last_seen_at: new Date().toISOString(), conversation_id: favoritesConversationId, last_body: 'Локальное облако заметок', last_created_at: null, last_sender_id: currentUserId, is_pinned: true, is_muted: false, is_blocked: false, block_hidden: false, blocked_by_other: false, hidden_presence_since: null } : null
   const selectedChat = selectedConversation === favoritesConversationId ? favoriteChat : chats.find((item) => item.conversation_id === selectedConversation) ?? null
+  const displayedMessages = selectedConversation === favoritesConversationId && favoritesSearch.trim()
+    ? messages.filter((message) => message.body.toLowerCase().includes(favoritesSearch.trim().toLowerCase()))
+    : messages
   const navIndex = ['Чаты', 'Профиль', 'Настройки'].indexOf(activeNav)
   const query = search.trim().toLowerCase()
   const isUserSearch = query.length >= 3
@@ -421,7 +460,7 @@ export default function App() {
       setChatError('Не удалось загрузить диалоги. Попробуйте обновить страницу.')
       return
     }
-    setChats((data ?? []) as ChatRow[])
+    setChats((data ?? []).map((row: Record<string, unknown>) => ({ ...row, id: (row as { id?: string; other_user_id?: string }).id ?? (row as { other_user_id?: string }).other_user_id })) as ChatRow[])
   }, [])
 
   async function requestNotificationPermission() {
@@ -585,15 +624,24 @@ export default function App() {
   useEffect(() => {
     if (!supabase || !authenticated || !currentUserId) return
     const client = supabase
+    let lastTouchedAt = 0
     const touchPresence = () => {
-      if (document.visibilityState === 'visible') void client.rpc('touch_presence')
+      if (document.visibilityState !== 'visible' || Date.now() - lastTouchedAt < 10_000) return
+      lastTouchedAt = Date.now()
+      void client.rpc('touch_presence')
     }
     touchPresence()
-    const interval = window.setInterval(touchPresence, 30_000)
+    const interval = window.setInterval(touchPresence, 15_000)
     document.addEventListener('visibilitychange', touchPresence)
+    window.addEventListener('focus', touchPresence)
+    window.addEventListener('pointerdown', touchPresence)
+    window.addEventListener('keydown', touchPresence)
     return () => {
       window.clearInterval(interval)
       document.removeEventListener('visibilitychange', touchPresence)
+      window.removeEventListener('focus', touchPresence)
+      window.removeEventListener('pointerdown', touchPresence)
+      window.removeEventListener('keydown', touchPresence)
     }
   }, [authenticated, currentUserId])
 
@@ -602,7 +650,7 @@ export default function App() {
     const refreshChats = () => {
       if (document.visibilityState === 'visible') void loadChats()
     }
-    const interval = window.setInterval(refreshChats, 25_000)
+    const interval = window.setInterval(refreshChats, 15_000)
     document.addEventListener('visibilitychange', refreshChats)
     return () => {
       window.clearInterval(interval)
@@ -691,6 +739,7 @@ export default function App() {
         const message = payload.new as Message
         const incomingBlocked = message.sender_id !== currentUserId && selectedChat?.is_blocked
         if (!incomingBlocked) setMessages((current) => current.some((item) => item.id === message.id) ? current.map((item) => item.id === message.id ? { ...item, ...message } : item) : [...current, message])
+        if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId) setChats((current) => current.map((chat) => chat.id === message.sender_id ? { ...chat, last_seen_at: new Date().toISOString() } : chat))
         if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId && !selectedChat?.is_muted && !incomingBlocked) {
           const sound = notificationAudioRef.current
           if (sound) {
@@ -832,6 +881,7 @@ export default function App() {
     }
     setAdminResults((current) => current.map((item) => item.id === profile.id ? { ...item, badge } : item))
     setChats((current) => current.map((item) => item.id === profile.id ? { ...item, badge } : item))
+    void loadAdminAudit()
   }
 
   async function grantOsi(profile: Profile) {
@@ -843,7 +893,10 @@ export default function App() {
     }
     const { error } = await supabase.rpc('admin_grant_osi', { p_user_id: profile.id, p_amount: amount })
     if (error) setAdminError('Не удалось выдать Оси.')
-    else setAdminError('Оси выданы.')
+    else {
+      setAdminError('Оси выданы.')
+      void loadAdminAudit()
+    }
   }
 
   async function setUserBan(profile: Profile, banned: boolean) {
@@ -854,7 +907,29 @@ export default function App() {
       return
     }
     setAdminResults((current) => current.map((item) => item.id === profile.id ? { ...item, is_banned: banned } : item))
+    void loadAdminAudit()
   }
+
+  async function loadAdminAudit() {
+    if (!supabase || !currentIsAdmin) return
+    const { data } = await supabase.rpc('list_admin_audit_log')
+    setAdminAudit((data ?? []) as AdminAudit[])
+  }
+
+  async function undoAdminAudit(entry: AdminAudit) {
+    if (!supabase || entry.undone_at) return
+    const { error } = await supabase.rpc('undo_admin_audit_action', { p_log_id: entry.id })
+    if (error) {
+      setAdminError('Не удалось отменить действие: ' + error.message)
+      return
+    }
+    setAdminAudit((current) => current.map((item) => item.id === entry.id ? { ...item, undone_at: new Date().toISOString() } : item))
+    await loadChats()
+  }
+
+  useEffect(() => {
+    if (activeNav === 'Настройки' && settingsSection === 'Админ-панель') void loadAdminAudit()
+  }, [activeNav, currentIsAdmin, settingsSection])
 
   function clearMessageHold() {
     if (messageHoldTimerRef.current !== null) window.clearTimeout(messageHoldTimerRef.current)
@@ -863,7 +938,7 @@ export default function App() {
 
   function openMessageMenu(message: Message, x: number, y: number) {
     clearMessageHold()
-    setMessageMenu({ message, x: Math.min(Math.max(14, x), window.innerWidth - 230), y: Math.min(Math.max(14, y), window.innerHeight - 180), mode: 'actions' })
+    setMessageMenu({ message, x: Math.min(Math.max(14, x), window.innerWidth - 230), y: Math.min(Math.max(14, y - 24), Math.max(14, window.innerHeight - 310)), mode: 'actions' })
   }
 
   function startMessageHold(message: Message, x: number, y: number) {
@@ -939,10 +1014,87 @@ export default function App() {
     await loadChats()
   }
 
+  async function copyMessage(message: Message) {
+    const text = message.image_path ? 'Фото' : message.audio_path ? 'Голосовое сообщение' : message.body
+    try {
+      await navigator.clipboard.writeText(text)
+      setChatError('Сообщение скопировано.')
+    } catch {
+      setChatError('Не удалось скопировать сообщение.')
+    }
+    setMessageMenu(null)
+  }
+
+  function beginReply(message: Message) {
+    setEditingMessage(null)
+    setReplyingTo(message)
+    setMessageMenu(null)
+    window.requestAnimationFrame(() => composerInputRef.current?.focus())
+  }
+
+  function beginEdit(message: Message) {
+    if (message.sender_id !== currentUserId || message.image_path || message.audio_path) return
+    setReplyingTo(null)
+    setEditingMessage(message)
+    setDraft(message.body)
+    setMessageMenu(null)
+    window.requestAnimationFrame(() => composerInputRef.current?.focus())
+  }
+
+  async function forwardMessage(chat: Chat) {
+    const message = forwardingMessage
+    if (!message || !currentUserId) return
+    const body = message.image_path ? 'Переслано: Фото' : message.audio_path ? 'Переслано: Голосовое сообщение' : message.body
+    if (chat.conversation_id === favoritesConversationId) {
+      const localMessage: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body: `Переслано: ${body}`, created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: null, image_name: null, audio_path: null, audio_name: null, audio_duration: null, forwarded_from_id: message.id }
+      const stored = JSON.parse(window.localStorage.getItem(favoritesStorageKey(currentUserId)) || '[]') as Message[]
+      window.localStorage.setItem(favoritesStorageKey(currentUserId), JSON.stringify([...stored, localMessage]))
+    } else if (supabase) {
+      let error: { message?: string } | null = null
+      if ((message.image_path || message.audio_path) && messageImageUrls[message.id]) {
+        try {
+          const source = await fetch(messageImageUrls[message.id])
+          const blob = await source.blob()
+          const isImage = Boolean(message.image_path)
+          const name = isImage ? message.image_name || 'photo' : message.audio_name || 'voice'
+          const path = `${chat.conversation_id}/${currentUserId}/${crypto.randomUUID()}-${name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
+          const upload = await supabase.storage.from('chat-media').upload(path, blob, { cacheControl: '31536000', contentType: blob.type || (isImage ? 'image/jpeg' : 'audio/webm') })
+          if (upload.error) throw upload.error
+          const result = isImage
+            ? await supabase.rpc('send_image_message', { p_conversation_id: chat.conversation_id, p_image_path: path, p_image_name: name })
+            : await supabase.rpc('send_voice_message', { p_conversation_id: chat.conversation_id, p_audio_path: path, p_audio_name: name, p_audio_duration: message.audio_duration || 1 })
+          error = result.error
+        } catch (reason) {
+          error = reason instanceof Error ? reason : { message: 'upload failed' }
+        }
+      } else {
+        const result = await supabase.rpc('send_direct_message', { p_conversation_id: chat.conversation_id, p_body: body, p_reply_to_id: null, p_forwarded_from_id: message.id })
+        error = result.error
+      }
+      if (error) setChatError('Не удалось переслать сообщение.')
+      else await loadChats()
+    }
+    setForwardingMessage(null)
+  }
+
   async function sendMessage(event: FormEvent) {
     event.preventDefault()
     const body = draft.trim()
     if (!body || !selectedConversation || sending || !currentUserId) return
+    if (editingMessage && selectedConversation !== favoritesConversationId && supabase) {
+      setSending(true)
+      const { error } = await supabase.rpc('edit_direct_message', { p_message_id: editingMessage.id, p_body: body })
+      setSending(false)
+      if (error) {
+        setChatError('Не удалось изменить сообщение.')
+        return
+      }
+      setMessages((current) => current.map((message) => message.id === editingMessage.id ? { ...message, body, edited_at: new Date().toISOString() } : message))
+      setDraft('')
+      setEditingMessage(null)
+      window.requestAnimationFrame(() => composerInputRef.current?.focus())
+      return
+    }
     if (selectedConversation === favoritesConversationId) {
       const message: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body, created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: null, image_name: null, audio_path: null, audio_name: null, audio_duration: null }
       setMessages((current) => {
@@ -961,6 +1113,8 @@ export default function App() {
     const { data, error } = await supabase.rpc('send_direct_message', {
       p_conversation_id: selectedConversation,
       p_body: body,
+      p_reply_to_id: replyingTo?.id ?? null,
+      p_forwarded_from_id: null,
     })
     setSending(false)
 
@@ -975,6 +1129,7 @@ export default function App() {
       ? { ...item, last_body: message.body, last_created_at: message.created_at, last_sender_id: message.sender_id }
       : item))
     setDraft('')
+    setReplyingTo(null)
     notifyRecipient(message)
     window.requestAnimationFrame(() => composerInputRef.current?.focus())
   }
@@ -1407,23 +1562,119 @@ export default function App() {
     }
   }
 
+  async function sendCallSignal(target: Chat, callId: string, kind: CallSignal['kind'], payload: CallSignal['payload'] = {}) {
+    if (!supabase || !currentUserId) return
+    await supabase.from('call_signals').insert({ call_id: callId, conversation_id: target.conversation_id, sender_id: currentUserId, recipient_id: target.id, kind, payload })
+  }
+
+  function createCallPeer(target: Chat, callId: string) {
+    const peer = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
+    peer.onicecandidate = (event) => { if (event.candidate) void sendCallSignal(target, callId, 'ice', { candidate: event.candidate.toJSON() }) }
+    peer.ontrack = (event) => {
+      if (remoteAudioRef.current) remoteAudioRef.current.srcObject = event.streams[0]
+      setCallStatus('connected')
+    }
+    peer.onconnectionstatechange = () => {
+      if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') endCall(false)
+    }
+    callPeerRef.current = peer
+    callIdRef.current = callId
+    return peer
+  }
+
+  async function resolveCallTarget(signal: CallSignal) {
+    const chat = chats.find((item) => item.id === signal.sender_id && item.conversation_id === signal.conversation_id)
+    if (chat) return chat
+    if (!supabase) return null
+    const { data } = await supabase.rpc('get_public_profile', { p_user_id: signal.sender_id })
+    const profile = data?.[0] as Profile | undefined
+    return profile ? { ...profile, conversation_id: signal.conversation_id, last_body: null, last_created_at: null, last_sender_id: null, is_pinned: false, is_muted: false, is_blocked: false, block_hidden: false, blocked_by_other: false, hidden_presence_since: null } : null
+  }
+
+  async function handleCallSignal(signal: CallSignal) {
+    if (signal.kind === 'offer') {
+      const target = await resolveCallTarget(signal)
+      if (!target) return
+      incomingOfferRef.current = signal
+      setCallTarget(target)
+      setCallStatus('incoming')
+      return
+    }
+    const peer = callPeerRef.current
+    if (!peer || signal.call_id !== callIdRef.current) return
+    if (signal.kind === 'answer' && signal.payload.description) {
+      await peer.setRemoteDescription(signal.payload.description)
+      for (const candidate of queuedIceCandidatesRef.current.splice(0)) await peer.addIceCandidate(candidate)
+    }
+    if (signal.kind === 'ice' && signal.payload.candidate) {
+      if (peer.remoteDescription) await peer.addIceCandidate(signal.payload.candidate)
+      else queuedIceCandidatesRef.current.push(signal.payload.candidate)
+    }
+    if (signal.kind === 'hangup' || signal.kind === 'decline') endCall(false)
+  }
+
   async function startCall() {
-    if (!selectedChat) return
+    if (!selectedChat || selectedConversation === favoritesConversationId || selectedChat.is_blocked) return
     setCallTarget(selectedChat)
     setCallStatus('calling')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       callStreamRef.current = stream
+      const callId = crypto.randomUUID()
+      const peer = createCallPeer(selectedChat, callId)
+      stream.getTracks().forEach((track) => peer.addTrack(track, stream))
+      const offer = await peer.createOffer()
+      await peer.setLocalDescription(offer)
+      await sendCallSignal(selectedChat, callId, 'offer', { description: offer })
     } catch {
       setCallStatus('microphone-error')
     }
   }
 
-  function endCall() {
+  async function acceptCall() {
+    const signal = incomingOfferRef.current
+    const target = callTarget
+    if (!signal || !target) return
+    setCallStatus('calling')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      callStreamRef.current = stream
+      const peer = createCallPeer(target, signal.call_id)
+      stream.getTracks().forEach((track) => peer.addTrack(track, stream))
+      await peer.setRemoteDescription(signal.payload.description as RTCSessionDescriptionInit)
+      const answer = await peer.createAnswer()
+      await peer.setLocalDescription(answer)
+      await sendCallSignal(target, signal.call_id, 'answer', { description: answer })
+      for (const candidate of queuedIceCandidatesRef.current.splice(0)) await peer.addIceCandidate(candidate)
+    } catch {
+      setCallStatus('microphone-error')
+    }
+  }
+
+  function endCall(notify = true) {
+    if (notify && callTarget && callIdRef.current) void sendCallSignal(callTarget, callIdRef.current, 'hangup')
+    callPeerRef.current?.close()
+    callPeerRef.current = null
     callStreamRef.current?.getTracks().forEach((track) => track.stop())
     callStreamRef.current = null
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null
+    callIdRef.current = null
+    queuedIceCandidatesRef.current = []
+    incomingOfferRef.current = null
     setCallTarget(null)
   }
+
+  function declineCall() {
+    if (callTarget && incomingOfferRef.current) void sendCallSignal(callTarget, incomingOfferRef.current.call_id, 'decline')
+    endCall(false)
+  }
+
+  useEffect(() => {
+    if (!supabase || !currentUserId) return
+    const client = supabase
+    const channel = client.channel(`call-signals-${currentUserId}`).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_signals', filter: `recipient_id=eq.${currentUserId}` }, (payload) => { void handleCallSignal(payload.new as CallSignal) }).subscribe()
+    return () => { void client.removeChannel(channel) }
+  }, [currentUserId, chats])
 
   function clampImageScale(value: number) {
     return Math.min(5, Math.max(1, value))
@@ -1581,7 +1832,7 @@ export default function App() {
         <header className="conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button><button type="button" className="avatar small header-avatar" aria-label={`Открыть профиль ${selectedChat.display_name}`} onClick={() => { void openProfile(selectedChat) }} style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(selectedChat.display_name || selectedChat.username)}</button><div><strong>{selectedChat.display_name || `@${selectedChat.username}`}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><span className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</span></div></header>
       {selectedChat.blocked_by_other && <div className="system-message"><strong>Ось-Бот</strong><span>Ваши последующие сообщения не будут видны собеседнику, увы он вас заблокировал ;&lt;&lt;</span></div>}
       {pinnedMessage && <button type="button" className="pinned-message" onClick={() => openMessageMenu(pinnedMessage, window.innerWidth / 2, 110)}><strong>Закреплённое сообщение</strong><span>{pinnedMessage.image_path ? 'Фотография' : pinnedMessage.body}</span></button>}
-      <div className="messages">{messages.map((message, index) => <div key={message.id}>{(index === 0 || messageDayKey(messages[index - 1].created_at) !== messageDayKey(message.created_at)) && <div className="date-label">{messageDateLabel(message.created_at)}</div>}<div className={`bubble-wrap ${message.sender_id === currentUserId ? 'mine' : ''}`} onContextMenu={(event) => { event.preventDefault(); openMessageMenu(message, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startMessageHold(message, touch.clientX, touch.clientY) }} onTouchMove={clearMessageHold} onTouchEnd={clearMessageHold} onTouchCancel={clearMessageHold}><div className="bubble">{message.image_path && (messageImageUrls[message.id] ? <button type="button" className="message-image-button" aria-label="Открыть фотографию" onClick={() => { resetImageZoom(); setOpenedImage({ src: messageImageUrls[message.id], name: message.image_name || 'Фотография' }) }}><img className={`message-image ${loadedMessageImages[message.id] ? 'is-loaded' : ''}`} src={messageImageUrls[message.id]} alt={message.image_name || 'Фотография'} onLoad={() => setLoadedMessageImages((current) => ({ ...current, [message.id]: true }))} /></button> : <span className="image-loading">Загрузка фото…</span>)}{message.audio_path && (messageImageUrls[message.id] ? <div className="voice-message"><span>Голосовое · {message.audio_duration || 0} сек.</span><audio controls preload="metadata" src={messageImageUrls[message.id]} /></div> : <span className="image-loading">Загрузка голосового…</span>)}{!message.image_path && !message.audio_path && message.body}<time>{formatTime(message.created_at)}{message.sender_id === currentUserId && message.read_at && <span className="read-receipt" aria-label="Прочитано"><CheckIcon /></span>}</time></div></div></div>)}{chatError && <p className="chat-error">{chatError}</p>}</div>
+      {selectedConversation === favoritesConversationId && <label className="favorites-search"><SearchIcon /><input value={favoritesSearch} onChange={(event) => setFavoritesSearch(event.target.value)} placeholder="Поиск в Избранном" /></label>}<div className="messages">{displayedMessages.map((message, index) => <div key={message.id}>{(index === 0 || messageDayKey(displayedMessages[index - 1].created_at) !== messageDayKey(message.created_at)) && <div className="date-label">{messageDateLabel(message.created_at)}</div>}<div className={`bubble-wrap ${message.sender_id === currentUserId ? 'mine' : ''}`} data-message-id={message.id} onContextMenu={(event) => { event.preventDefault(); openMessageMenu(message, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startMessageHold(message, touch.clientX, touch.clientY) }} onTouchMove={clearMessageHold} onTouchEnd={clearMessageHold} onTouchCancel={clearMessageHold}><div className="bubble">{message.forwarded_from_id && <small className="message-forwarded">Пересланное сообщение</small>}{message.reply_to_id && <span className="message-reply">{message.reply_sender_id === currentUserId ? 'Вы' : 'Ответ'} · {message.reply_body || 'Сообщение недоступно'}</span>}{message.image_path && (messageImageUrls[message.id] ? <button type="button" className="message-image-button" aria-label="Открыть фотографию" onClick={() => { resetImageZoom(); setOpenedImage({ src: messageImageUrls[message.id], name: message.image_name || 'Фотография' }) }}><img className={`message-image ${loadedMessageImages[message.id] ? 'is-loaded' : ''}`} src={messageImageUrls[message.id]} alt={message.image_name || 'Фотография'} onLoad={() => setLoadedMessageImages((current) => ({ ...current, [message.id]: true }))} /></button> : <span className="image-loading">Загрузка фото…</span>)}{message.audio_path && (messageImageUrls[message.id] ? <div className="voice-message"><span>Голосовое · {message.audio_duration || 0} сек.</span><audio controls preload="metadata" src={messageImageUrls[message.id]} /></div> : <span className="image-loading">Загрузка голосового…</span>)}{!message.image_path && !message.audio_path && message.body}<time>{formatTime(message.created_at)}{message.edited_at && <span> · изм.</span>}{message.sender_id === currentUserId && message.read_at && <span className="read-receipt" aria-label="Прочитано"><CheckIcon /></span>}</time></div></div></div>)}{chatError && <p className="chat-error">{chatError}</p>}</div>
         {voiceLocked && <div className="voice-record-menu"><strong>{voicePaused ? 'На паузе' : 'Запись голосового'} · {voiceSeconds} сек.</strong><button type="button" onClick={toggleVoicePause}>{voicePaused ? 'Продолжить' : 'Пауза'}</button><button type="button" onClick={() => finishVoiceRecording(true)}>Отправить</button><button type="button" className="voice-delete" onClick={() => finishVoiceRecording(false)}>Удалить</button></div>}<form onSubmit={sendMessage} className="composer"><input ref={photoInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={handlePhotoSelection} /><button type="button" className="composer-action" aria-label="Прикрепить фото" onClick={() => photoInputRef.current?.click()} disabled={photoUploading}><CameraIcon /></button><input ref={composerInputRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Написать сообщение" disabled={sending || voiceRecording} /><button type="button" className={`composer-action voice-button ${voiceRecording ? 'is-recording' : ''}`} aria-label="Записать голосовое" onPointerDown={onVoicePointerDown} onPointerUp={onVoicePointerUp} onPointerCancel={() => { if (voiceHoldActiveRef.current) finishVoiceRecording(false) }} disabled={photoUploading}><MicrophoneIcon /></button><button className="send" aria-label="Отправить" disabled={sending || voiceRecording}><ArrowRightIcon /></button></form>
       </> : <div className="page-view"><p className="eyebrow">ЛИЧНЫЕ СООБЩЕНИЯ</p><h2>Найдите человека по логину.</h2><p>Введите в поиске слева минимум 3 символа из его @логина — после этого можно начать настоящий диалог.</p></div>)}
       {!selectedProfile && activeNav === 'Главная' && <div className="page-view"><p className="eyebrow">OSIRIUM</p><h2>Ваши сообщения.</h2><p>У вас {chats.length} {chats.length === 1 ? 'диалог' : 'диалогов'}. Используйте поиск, чтобы написать новому человеку.</p><button className="page-action" onClick={() => setActiveNav('Чаты')}>Открыть чаты <ArrowRightIcon /></button></div>}
@@ -1589,10 +1840,11 @@ export default function App() {
       {!selectedProfile && activeNav === 'Настройки' && <div className="page-view settings-view"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">НАСТРОЙКИ</p>{settingsSection === 'Профиль' && <><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><p className="settings-description">Username <b>@{currentUsername}</b> используется для поиска и остаётся отдельным от display-ника.</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()} aria-label="Изменить аватар">{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'JPG, PNG или WebP до 5 МБ'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} placeholder="Как вас будут видеть" /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} placeholder="Расскажите о себе" /><small>{profileBio.length}/160</small></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Это отдельный код только для этого браузера. Он не меняет пароль аккаунта и не покидает устройство.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder={appLockHash ? 'Оставьте пустым, чтобы не менять' : '6 цифр'} /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}{settingsSection === 'Опасная зона' && <section className="danger-zone"><h2>Опасная зона</h2><p>Здесь меняется основной пароль аккаунта — он используется при входе в Osirium.</p><form className="privacy-form" onSubmit={changeAccountPassword}><label>Новый пароль аккаунта<input type="password" value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} autoComplete="new-password" placeholder="Минимум 8 символов" /></label><label>Повторите пароль<input type="password" value={newAccountPasswordRepeat} onChange={(event) => setNewAccountPasswordRepeat(event.target.value)} autoComplete="new-password" placeholder="Повторите пароль" /></label><button className="privacy-save" disabled={accountPasswordSaving}>{accountPasswordSaving ? 'Меняем…' : 'Сменить пароль'}</button>{accountPasswordError && <p className="privacy-error">{accountPasswordError}</p>}</form><button className="logout" onClick={() => { void logout() }}>Выйти из аккаунта</button></section>}</div>}
     </section>
 
-    {callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Исходящий звонок"><div className="call-card"><span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}</span><h2>{callTarget.display_name || `@${callTarget.username}`}</h2><p>{callStatus === 'calling' ? 'Соединение…' : 'Не удалось получить доступ к микрофону'}</p>{callStatus === 'calling' && <span className="call-pulse" aria-hidden="true" />}<button type="button" className="call-hangup" onClick={endCall}>Завершить звонок</button></div></div>}
+    <audio ref={remoteAudioRef} autoPlay />{callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок"><div className="call-card"><span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}</span><h2>{callTarget.display_name || `@${callTarget.username}`}</h2><p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : 'Не удалось получить доступ к микрофону'}</p>{(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}{callStatus === 'incoming' && <div className="call-actions"><button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button><button type="button" className="call-hangup" onClick={declineCall}>Отклонить</button></div>}{callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => endCall()}>Завершить звонок</button>}</div></div>}
 
     {chatMenu && <div className="message-menu-layer" onClick={() => setChatMenu(null)}><div className="message-menu chat-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(event) => event.stopPropagation()}>{chatMenu.mode === 'actions' ? <><button onClick={() => { void toggleChatPin(chatMenu.chat) }}>{chatMenu.chat.is_pinned ? 'Открепить чат' : 'Закрепить чат'}</button><button onClick={() => { void toggleChatMute(chatMenu.chat) }}>{chatMenu.chat.is_muted ? 'Включить звук' : 'Без звука'}</button>{chatMenu.chat.is_blocked ? <button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false, false) }}>Разблокировать</button> : <button className="message-menu-danger" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'block' } : null)}>Заблокировать</button>}</> : <><p>Заблокировать пользователя</p><button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false) }}>Заблокировать</button><button onClick={() => { void setChatBlock(chatMenu.chat, true) }}>Заблокировать скрытно</button><button className="message-menu-back" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
-    {messageMenu && <div className="message-menu-layer" onClick={() => setMessageMenu(null)}><div className="message-menu" style={{ left: messageMenu.x, top: messageMenu.y }} onClick={(event) => event.stopPropagation()}>{messageMenu.mode === 'actions' ? <><button onClick={() => { void toggleMessagePin(messageMenu.message) }}>{pinnedMessage?.id === messageMenu.message.id ? 'Открепить сообщение' : 'Закрепить сообщение'}</button><button className="message-menu-danger" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'delete' } : null)}>Удалить</button></> : <><p>Удалить сообщение</p>{messageMenu.message.sender_id === currentUserId && <button className="message-menu-danger" onClick={() => { void deleteMessage(messageMenu.message, true) }}>Удалить у всех</button>}<button onClick={() => { void deleteMessage(messageMenu.message, false) }}>Удалить у себя</button><button className="message-menu-back" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
+    {messageMenu && <div className="message-menu-layer" onClick={() => setMessageMenu(null)}><div className="message-menu" style={{ left: messageMenu.x, top: messageMenu.y }} onClick={(event) => event.stopPropagation()}>{messageMenu.mode === 'actions' ? <><button onClick={() => beginReply(messageMenu.message)}>Ответить</button><button onClick={() => { setForwardingMessage(messageMenu.message); setMessageMenu(null) }}>Переслать</button><button onClick={() => { void copyMessage(messageMenu.message) }}>Копировать</button>{messageMenu.message.sender_id === currentUserId && !messageMenu.message.image_path && !messageMenu.message.audio_path && <button onClick={() => beginEdit(messageMenu.message)}>Изменить</button>}<button onClick={() => { void toggleMessagePin(messageMenu.message) }}>{pinnedMessage?.id === messageMenu.message.id ? 'Открепить сообщение' : 'Закрепить сообщение'}</button><button className="message-menu-danger" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'delete' } : null)}>Удалить</button></> : <><p>Удалить сообщение</p>{messageMenu.message.sender_id === currentUserId && <button className="message-menu-danger" onClick={() => { void deleteMessage(messageMenu.message, true) }}>Удалить у всех</button>}<button onClick={() => { void deleteMessage(messageMenu.message, false) }}>Удалить у себя</button><button className="message-menu-back" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
+    {forwardingMessage && <div className="forward-overlay" onClick={() => setForwardingMessage(null)}><section className="forward-sheet" onClick={(event) => event.stopPropagation()}><h3>Переслать сообщение</h3>{favoriteChat && <button onClick={() => { void forwardMessage(favoriteChat) }}>★ Избранное</button>}{chats.map((chat) => <button key={chat.conversation_id} onClick={() => { void forwardMessage(chat) }}>{chat.display_name || `@${chat.username}`}</button>)}</section></div>}
     {openedImage && <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Просмотр фотографии" onClick={() => setOpenedImage(null)}><button type="button" className="image-viewer-close" aria-label="Закрыть фотографию" onClick={() => setOpenedImage(null)}>×</button><img className="image-viewer-photo" src={openedImage.src} alt={openedImage.name} style={{ transform: `scale(${imageScale})` }} onWheel={handleImageWheel} onTouchStart={handleImageTouchStart} onTouchMove={handleImageTouchMove} onTouchEnd={() => { imagePinchRef.current = null }} onDoubleClick={resetImageZoom} onClick={(event) => event.stopPropagation()} /><span>{openedImage.name}</span></div>}
     {appLocked && <div className="app-lock-overlay" role="dialog" aria-modal="true" aria-label="Osirium заблокирован"><form className="app-lock-card" onSubmit={unlockApp}><h2>Введите код</h2><p>Osirium был заблокирован после периода бездействия.</p><input autoFocus type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={lockAttempt} onChange={(event) => setLockAttempt(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="current-password" placeholder="6 цифр" /><button>Разблокировать</button>{lockError && <span className="app-lock-error">{lockError}</span>}</form></div>}
     {!appBooting && showWelcome && !authenticated && <div className="welcome-overlay"><div className="welcome-card"><div className="welcome-logo"><span>o</span></div><p className="eyebrow">OSIRIUM</p><h2>{authMode === 'login' ? <>С возвращением<br />в Osirium</> : <>Создайте<br />свой Osirium</>}</h2><p>{authMode === 'login' ? 'Войдите, чтобы продолжить.' : 'Свобода начинается с имени.'}</p><form onSubmit={authenticate} className="auth-form"><label>Логин<input autoFocus value={username} onChange={(event) => setUsername(event.target.value.replace(/[^a-zA-Z0-9_]/g, ''))} autoComplete="username" placeholder="osirium_user" /></label><label>Пароль<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} placeholder="Минимум 8 символов" /></label><button disabled={authLoading}>{authLoading ? 'Подождите…' : authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button></form><button className="auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError('') }}>{authMode === 'login' ? 'Нет аккаунта? Создать' : 'Уже есть аккаунт? Войти'}</button>{authError && <p className="auth-error">{authError}</p>}</div></div>}
@@ -1600,5 +1852,6 @@ export default function App() {
     {openedStory && !storyUrls[openedStory.story_id] && storyViewerError && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className="story-access-error" onClick={(event) => event.stopPropagation()}><strong>История недоступна</strong><span>{storyViewerError}</span></div></div>}
     {openedStory && storyUrls[openedStory.story_id] && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className={`story-viewer-media ratio-${openedStory.aspect_ratio.replace(':', '-')}`} onClick={(event) => event.stopPropagation()}>{openedStory.media_type === 'video' ? <video className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} controls autoPlay onCanPlay={() => setStoryMediaLoaded(true)} /> : <img className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} alt="История" onLoad={() => setStoryMediaLoaded(true)} />}{previousStory && <button type="button" className="story-step story-step-previous" aria-label="Предыдущая история" onClick={() => { void openStory(previousStory) }}><ArrowRightIcon /></button>}{nextStory && <button type="button" className="story-step story-step-next" aria-label="Следующая история" onClick={() => { void openStory(nextStory) }}><ArrowRightIcon /></button>}{openedStory.user_id === currentUserId && <button type="button" className="story-viewers-toggle" onClick={() => { setStoryViewersOpen((value) => !value); if (!storyViewersOpen) void loadStoryViewers(openedStory.story_id) }}>Зрители{storyViewers.length ? ` · ${storyViewers.length}` : ''}</button>}<div className="story-viewer-copy"><strong>{openedStory.overlay_text}</strong><p>{openedStory.description}</p></div>{openedStory.user_id !== currentUserId && <form className="story-reply" onSubmit={replyToStory}><input value={storyReply} onChange={(event) => setStoryReply(event.target.value.slice(0, 500))} placeholder="Написать сообщение" maxLength={500} /><button type="button" className={`story-reaction ${storyReaction ? 'active' : ''}`} aria-label="Поставить реакцию" onClick={() => { void reactToStory() }}><img src="/story-reaction.png" alt="" /></button><button className="story-reply-send" disabled={storyReplying || !storyReply.trim()} aria-label="Отправить ответ"><ArrowRightIcon /></button></form>}{storyViewersOpen && openedStory.user_id === currentUserId && <div className="story-viewers"><strong>Зрители</strong>{storyViewerError && <small>{storyViewerError}</small>}{storyViewers.length ? storyViewers.map((viewer) => <div className="story-viewer-user" key={viewer.user_id}><span className="avatar" style={{ backgroundColor: viewer.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(viewer.avatar_path) ? <img src={profileAvatarUrl(viewer.avatar_path) as string} alt="" /> : initials(viewer.display_name || viewer.username)}</span><span>{viewer.display_name || `@${viewer.username}`}<small>Просмотрено в {formatTime(viewer.viewed_at)}</small></span>{viewer.reaction === 'heart' && <img src="/story-reaction.png" alt="Реакция" />}</div>) : <p>Пока никто не посмотрел.</p>}</div>}{storyViewerError && !storyViewersOpen && <span className="story-viewer-error">{storyViewerError}</span>}</div></div>}
     {selectedProfile && <form className="contact-sheet" onSubmit={saveContact}><span>КОНТАКТ</span><label>Как записать человека<input value={contactLabel} onChange={(event) => setContactLabel(event.target.value.slice(0, 48))} maxLength={48} placeholder="Имя контакта" /></label><button disabled={contactSaving}>{contactSaving ? 'Сохраняем…' : contacts[selectedProfile.id] ? 'Сохранить имя' : 'Добавить в контакты'}</button>{contactError && <small>{contactError}</small>}</form>}
+    {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && currentIsAdmin && <div className="admin-audit-float"><p className="eyebrow">ЖУРНАЛ</p><h3>Действия администратора</h3><div className="admin-audit-list">{adminAudit.length ? adminAudit.map((entry) => <div className="admin-audit-row" key={entry.id}><div><strong>{entry.action === 'badge' ? 'Бейдж' : entry.action === 'ban' ? 'Блокировка' : 'Выдача Оси'} · @{entry.username}</strong><small>{formatTime(entry.created_at)}{entry.undone_at ? ' · отменено' : ''}</small></div>{!entry.undone_at && <button type="button" onClick={() => { void undoAdminAudit(entry) }}>Отменить</button>}</div>) : <p className="list-note">Действий пока нет.</p>}</div></div>}
   </main>
 }
