@@ -1215,7 +1215,7 @@ export default function App() {
       <span className="avatar" style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(chat.display_name || chat.username)}</span>
       <span className="chat-copy">
         <span className="chat-line"><strong>{chat.display_name || `@${chat.username}`}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}</time></span>
-        <span className="chat-line"><small>@{chat.username} · {formatPreview(chat.last_body)}</small></span>
+        <span className={`chat-line ${formatPresence(chat.last_seen_at) === 'в сети' ? 'presence-online' : ''}`}><small>{formatPresence(chat.last_seen_at)} · {formatPreview(chat.last_body)}</small></span>
       </span>
     </button>
   )
