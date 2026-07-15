@@ -78,11 +78,23 @@ type Story = {
   expires_at: string
 }
 
+type StoryViewer = {
+  user_id: string
+  username: string
+  display_name: string
+  avatar_color: string | null
+  avatar_path: string | null
+  reaction: 'heart' | null
+  viewed_at: string
+}
+
 const defaultAvatarColor = '#dfe6f0'
 const lockTimestampKey = (userId: string) => `osirium:last-hidden-at:${userId}`
 const appLockStorageKey = (userId: string) => `osirium:local-app-lock:${userId}`
 const appLockedStorageKey = (userId: string) => `osirium:local-app-locked:${userId}`
 const lockPasswordIterations = 210_000
+const favoritesConversationId = 'local:favorites'
+const favoritesStorageKey = (userId: string) => `osirium:favorites:${userId}`
 
 type PrivacyProfile = {
   username: string | null
@@ -286,6 +298,16 @@ export default function App() {
   const [stories, setStories] = useState<Story[]>([])
   const [storyUrls, setStoryUrls] = useState<Record<string, string>>({})
   const [openedStory, setOpenedStory] = useState<Story | null>(null)
+  const [storyReply, setStoryReply] = useState('')
+  const [storyReplying, setStoryReplying] = useState(false)
+  const [storyReaction, setStoryReaction] = useState<'heart' | null>(null)
+  const [storyViewers, setStoryViewers] = useState<StoryViewer[]>([])
+  const [storyViewersOpen, setStoryViewersOpen] = useState(false)
+  const [storyViewerError, setStoryViewerError] = useState('')
+  const [avatarCropFile, setAvatarCropFile] = useState<File | null>(null)
+  const [avatarCropUrl, setAvatarCropUrl] = useState<string | null>(null)
+  const [avatarCropZoom, setAvatarCropZoom] = useState(1)
+  const [avatarCropOffset, setAvatarCropOffset] = useState({ x: 0, y: 0 })
   const [storyFile, setStoryFile] = useState<File | null>(null)
   const [storyPreviewUrl, setStoryPreviewUrl] = useState<string | null>(null)
   const [storyOverlayText, setStoryOverlayText] = useState('')
@@ -311,13 +333,15 @@ export default function App() {
   const storyInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLInputElement>(null)
   const avatarInputRef = useRef<HTMLInputElement>(null)
+  const avatarCropDragRef = useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null)
   const notificationAudioRef = useRef<HTMLAudioElement | null>(null)
   const imagePinchRef = useRef<{ distance: number; scale: number } | null>(null)
   const bootStartedAtRef = useRef(Date.now())
   const messageHoldTimerRef = useRef<number | null>(null)
   const scrollToLatestMessageRef = useRef(false)
 
-  const selectedChat = chats.find((item) => item.conversation_id === selectedConversation) ?? null
+  const favoriteChat: Chat | null = currentUserId ? { id: currentUserId, username: 'избранное', display_name: 'Избранное', avatar_color: '#303030', avatar_path: null, is_admin: false, badge: null, is_banned: false, last_seen_at: new Date().toISOString(), conversation_id: favoritesConversationId, last_body: 'Локальное облако заметок', last_created_at: null, last_sender_id: currentUserId } : null
+  const selectedChat = selectedConversation === favoritesConversationId ? favoriteChat : chats.find((item) => item.conversation_id === selectedConversation) ?? null
   const navIndex = ['Чаты', 'Контакты', 'Настройки'].indexOf(activeNav)
   const query = search.trim().toLowerCase()
   const isUserSearch = query.length >= 3
@@ -376,6 +400,11 @@ export default function App() {
   }, [])
 
   const loadMessages = useCallback(async (conversationId: string) => {
+    if (conversationId === favoritesConversationId) {
+      try { setMessages(JSON.parse(window.localStorage.getItem(favoritesStorageKey(currentUserId || 'guest')) || '[]') as Message[]) } catch { setMessages([]) }
+      setPinnedMessage(null)
+      return
+    }
     if (!supabase) return
     await supabase.rpc('mark_direct_messages_read', { p_conversation_id: conversationId })
     const { data, error } = await supabase.rpc('list_messages', { p_conversation_id: conversationId })
@@ -533,7 +562,7 @@ export default function App() {
   }, [authenticated, query])
 
   useEffect(() => {
-    if (!supabase || !selectedConversation) return
+    if (!supabase || !selectedConversation || selectedConversation === favoritesConversationId) return
     const client = supabase
     const channel = client
       .channel(`messages-${selectedConversation}`)
@@ -740,7 +769,19 @@ export default function App() {
   async function sendMessage(event: FormEvent) {
     event.preventDefault()
     const body = draft.trim()
-    if (!body || !supabase || !selectedConversation || sending) return
+    if (!body || !selectedConversation || sending || !currentUserId) return
+    if (selectedConversation === favoritesConversationId) {
+      const message: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body, created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: null, image_name: null, audio_path: null, audio_name: null, audio_duration: null }
+      setMessages((current) => {
+        const next = [...current, message]
+        window.localStorage.setItem(favoritesStorageKey(currentUserId), JSON.stringify(next))
+        return next
+      })
+      setDraft('')
+      window.requestAnimationFrame(() => composerInputRef.current?.focus())
+      return
+    }
+    if (!supabase) return
 
     setSending(true)
     setChatError('')
@@ -878,6 +919,59 @@ export default function App() {
     setStoryOverlayText('')
     setStoryDescription('')
     await loadStories()
+  }
+
+  async function loadStoryViewers(storyId: string) {
+    if (!supabase) return
+    const { data, error } = await supabase.rpc('list_story_viewers', { p_story_id: storyId })
+    if (error) {
+      setStoryViewerError('Не удалось загрузить зрителей.')
+      return
+    }
+    setStoryViewers((data ?? []) as StoryViewer[])
+  }
+
+  async function openStory(story: Story) {
+    setOpenedStory(story)
+    setStoryReply('')
+    setStoryReaction(null)
+    setStoryViewersOpen(false)
+    setStoryViewerError('')
+    if (!supabase) return
+    if (story.user_id !== currentUserId) {
+      const { error } = await supabase.rpc('record_story_view', { p_story_id: story.story_id, p_reaction: null })
+      if (error) setStoryViewerError('Не удалось отметить просмотр истории.')
+    } else {
+      await loadStoryViewers(story.story_id)
+    }
+  }
+
+  async function reactToStory() {
+    if (!supabase || !openedStory || openedStory.user_id === currentUserId) return
+    const nextReaction = storyReaction === 'heart' ? null : 'heart'
+    const { error } = await supabase.rpc('record_story_view', { p_story_id: openedStory.story_id, p_reaction: nextReaction })
+    if (error) {
+      setStoryViewerError('Не удалось поставить реакцию.')
+      return
+    }
+    setStoryReaction(nextReaction)
+  }
+
+  async function replyToStory(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase || !openedStory || openedStory.user_id === currentUserId || storyReplying) return
+    const body = storyReply.trim()
+    if (!body) return
+    setStoryReplying(true)
+    setStoryViewerError('')
+    const { error } = await supabase.rpc('reply_to_story', { p_story_id: openedStory.story_id, p_body: body })
+    setStoryReplying(false)
+    if (error) {
+      setStoryViewerError('Не удалось отправить ответ на историю.')
+      return
+    }
+    setStoryReply('')
+    await loadChats()
   }
 
   async function uploadVoice(blob: Blob, duration: number) {
@@ -1034,27 +1128,58 @@ export default function App() {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file || !supabase || !currentUserId) return
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
-      setProfileError('Аватар: JPG, PNG или WebP до 5 МБ.')
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type) || file.size > 8 * 1024 * 1024) {
+      setProfileError('Аватар: JPG, PNG, WebP или GIF до 8 МБ.')
       return
     }
-    const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg'
-    const path = `${currentUserId}/avatar-${Date.now()}.${extension}`
+    if (avatarCropUrl) URL.revokeObjectURL(avatarCropUrl)
+    setAvatarCropFile(file)
+    setAvatarCropUrl(URL.createObjectURL(file))
+    setAvatarCropZoom(1)
+    setAvatarCropOffset({ x: 0, y: 0 })
+  }
+
+  async function saveAvatarCrop() {
+    const file = avatarCropFile
+    if (!file || !supabase || !currentUserId) return
     setAvatarUploading(true)
     setProfileError('')
-    const { error: uploadError } = await supabase.storage.from('avatars').upload(path, file, { upsert: false, contentType: file.type })
+    let uploadFile = file
+    if (file.type !== 'image/gif') {
+      const image = await createImageBitmap(file)
+      const canvas = document.createElement('canvas')
+      canvas.width = 640
+      canvas.height = 640
+      const context = canvas.getContext('2d')
+      if (!context) return
+      const scale = Math.max(640 / image.width, 640 / image.height) * avatarCropZoom
+      const width = image.width * scale
+      const height = image.height * scale
+      context.drawImage(image, (640 - width) / 2 + avatarCropOffset.x * (640 / 260), (640 - height) / 2 + avatarCropOffset.y * (640 / 260), width, height)
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.86))
+      image.close()
+      if (!blob) { setAvatarUploading(false); setProfileError('Не удалось подготовить аватар.'); return }
+      uploadFile = new File([blob], 'avatar.webp', { type: 'image/webp' })
+    }
+    const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg'
+    const finalExtension = uploadFile.type === 'image/webp' ? 'webp' : extension
+    const finalPath = `${currentUserId}/avatar-${Date.now()}.${finalExtension}`
+    const { error: uploadError } = await supabase.storage.from('avatars').upload(finalPath, uploadFile, { upsert: false, contentType: uploadFile.type })
     if (uploadError) {
       setAvatarUploading(false)
       setProfileError(`Не удалось загрузить аватар: ${uploadError.message}`)
       return
     }
-    const { error: profileUpdateError } = await supabase.from('profiles').update({ avatar_path: path }).eq('id', currentUserId)
+    const { error: profileUpdateError } = await supabase.from('profiles').update({ avatar_path: finalPath }).eq('id', currentUserId)
     setAvatarUploading(false)
     if (profileUpdateError) {
       setProfileError('Аватар загрузился, но не сохранился в профиле.')
       return
     }
-    setCurrentAvatarUrl(supabase.storage.from('avatars').getPublicUrl(path).data.publicUrl)
+    setCurrentAvatarUrl(supabase.storage.from('avatars').getPublicUrl(finalPath).data.publicUrl)
+    if (avatarCropUrl) URL.revokeObjectURL(avatarCropUrl)
+    setAvatarCropFile(null)
+    setAvatarCropUrl(null)
   }
 
   async function changeAccountPassword(event: FormEvent) {
@@ -1232,7 +1357,7 @@ export default function App() {
     {appBooting && <div className="app-loader" role="status" aria-label="Загрузка Osirium"><div className="app-loader-mark" /><p>OSIRIUM</p><span>Загружаем пространство</span><i /></div>}
     <aside className="sidebar">
       <div className="sidebar-head"><h1>{activeNav === 'Чаты' ? 'Сообщения' : activeNav}</h1>{activeNav !== 'Настройки' && <button className="icon-button" aria-label="Новый диалог" onClick={() => { setActiveNav('Чаты'); setSearch('') }}><PlusIcon /></button>}</div>
-      {(activeNav === 'Чаты' || activeNav === 'Контакты') && stories.length > 0 && <div className="stories-row" aria-label="Истории">{Array.from(new Map(stories.map((story) => [story.user_id, story])).values()).map((story) => <button type="button" className="story-avatar" key={story.user_id} onClick={() => setOpenedStory(story)}><span className="avatar" style={{ backgroundColor: story.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(story.avatar_path) ? <img src={profileAvatarUrl(story.avatar_path) as string} alt="" /> : initials(story.display_name || story.username)}</span><small>{story.display_name || `@${story.username}`}</small></button>)}</div>}
+      {(activeNav === 'Чаты' || activeNav === 'Контакты') && stories.length > 0 && <div className="stories-row" aria-label="Истории">{Array.from(new Map(stories.map((story) => [story.user_id, story])).values()).map((story) => <button type="button" className="story-avatar" key={story.user_id} onClick={() => { void openStory(story) }}><span className="avatar" style={{ backgroundColor: story.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(story.avatar_path) ? <img src={profileAvatarUrl(story.avatar_path) as string} alt="" /> : initials(story.display_name || story.username)}</span><small>{story.display_name || `@${story.username}`}</small></button>)}</div>}
       {(activeNav === 'Чаты' || activeNav === 'Контакты') && <label className="search"><SearchIcon /><input value={search} onChange={(event) => setSearch(event.target.value.replace(/^@/, ''))} placeholder="Поиск" /></label>}
       {(activeNav === 'Чаты' || activeNav === 'Контакты') && <section className="chat-list">
         {isUserSearch ? <>
@@ -1240,6 +1365,7 @@ export default function App() {
           {!searchLoading && searchResults.map(renderUserResult)}
           {!searchLoading && !searchResults.length && <p className="list-note">Пользователи по этому логину не найдены.</p>}
         </> : <>
+          {favoriteChat && renderChatRow(favoriteChat)}
           {visibleChats.map(renderChatRow)}
           {!visibleChats.length && <p className="list-note">Введите минимум 3 символа логина, чтобы найти человека.</p>}
         </>}
@@ -1258,7 +1384,7 @@ export default function App() {
     {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <div className="page-view settings-view admin-page admin-page-secondary"><p className="eyebrow">ДОСТУП И ВАЛЮТА</p><h2>Блокировка и Оси</h2><p className="settings-description">Выдавайте Оси или блокируйте аккаунты. Заблокированный пользователь не сможет войти и писать сообщения.</p><div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={`controls-${profile.id}`}><div><strong>@{profile.username}</strong><small>{profile.is_banned ? 'Заблокирован' : 'Активен'}</small></div><div className="admin-badge-actions"><input className="osi-amount-input" type="number" min="1" step="1" value={osiAmount} onChange={(event) => setOsiAmount(event.target.value)} aria-label="Количество Оси" /><button className="badge-idea" onClick={() => { void grantOsi(profile) }}>Выдать Оси</button><button className={profile.is_banned ? 'badge-unban' : 'badge-ban'} onClick={() => { void setUserBan(profile, !profile.is_banned) }}>{profile.is_banned ? 'Разблокировать' : 'Заблокировать'}</button></div></div>)}</div></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Истории' && <div className="page-view settings-view story-settings-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ИСТОРИИ</p><h2>Поделиться историей</h2><p className="settings-description">Истории видят только люди, с которыми у вас уже есть диалог. Через 24 часа они исчезают.</p><form className="story-form" onSubmit={publishStory}><input ref={storyInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" onChange={handleStorySelection} /><button type="button" className="story-add" onClick={() => storyInputRef.current?.click()}>Добавить историю</button><label>Размер<select value={storyAspectRatio} onChange={(event) => setStoryAspectRatio(event.target.value)}><option value="9:16">Вертикальный · 9:16</option><option value="1:1">Квадрат · 1:1</option><option value="16:9">Горизонтальный · 16:9</option></select></label>{storyPreviewUrl && <div className={`story-preview ratio-${storyAspectRatio.replace(':', '-')}`}>{storyFile?.type.startsWith('video/') ? <video src={storyPreviewUrl} controls /> : <img src={storyPreviewUrl} alt="Предпросмотр истории" />}{storyOverlayText && <strong>{storyOverlayText}</strong>}</div>}<label>Надпись на истории<input value={storyOverlayText} onChange={(event) => setStoryOverlayText(event.target.value.slice(0, 80))} maxLength={80} placeholder="Например, доброе утро" /></label><label>Описание<textarea value={storyDescription} onChange={(event) => setStoryDescription(event.target.value.slice(0, 180))} maxLength={180} placeholder="Описание истории" /></label><button className="story-publish" disabled={!storyFile || storyUploading}>{storyUploading ? 'Публикуем…' : 'Опубликовать'}</button>{storyError && <p className="privacy-error">{storyError}</p>}</form></div>}
     {mobileSettingsOpen && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <button type="button" className="mobile-admin-return" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button>}
-    <section className={`conversation ${selectedChat ? 'is-open' : ''}`}>
+    <section className={`conversation ${selectedChat ? 'is-open' : ''} ${selectedConversation === favoritesConversationId ? 'favorites' : ''}`}>
       {selectedProfile && <div className="profile-view"><button className="profile-back" onClick={() => { setSelectedProfile(null); setSelectedProfileBio('') }}>← Назад</button><span className="avatar profile-large" style={{ backgroundColor: selectedProfile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedProfile.avatar_path) ? <img src={profileAvatarUrl(selectedProfile.avatar_path) as string} alt="" /> : initials(selectedProfile.display_name || selectedProfile.username)}</span><h2>{selectedProfile.display_name || `@${selectedProfile.username}`}<RoleBadge isAdmin={selectedProfile.is_admin} badge={selectedProfile.badge} /></h2><p className="profile-status">@{selectedProfile.username}</p><div className="profile-info"><span>ОПИСАНИЕ</span><p>{selectedProfileLoading ? 'Загружаем…' : selectedProfileBio || `${selectedProfile.display_name || `@${selectedProfile.username}`} ещё не придумал что можно написать в описание ;<`}</p></div><button className="page-action" onClick={() => { void selectChat(selectedProfile) }}>Открыть диалог <ArrowRightIcon /></button></div>}
       {!selectedProfile && activeNav === 'Чаты' && (selectedChat ? <>
         <header className="conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button><button type="button" className="avatar small header-avatar" aria-label={`Открыть профиль ${selectedChat.display_name}`} onClick={() => { void openProfile(selectedChat) }} style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(selectedChat.display_name || selectedChat.username)}</button><div><strong>{selectedChat.display_name || `@${selectedChat.username}`}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><span className={formatPresence(selectedChat.last_seen_at) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.last_seen_at)}</span></div></header>
@@ -1277,7 +1403,8 @@ export default function App() {
     {openedImage && <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Просмотр фотографии" onClick={() => setOpenedImage(null)}><button type="button" className="image-viewer-close" aria-label="Закрыть фотографию" onClick={() => setOpenedImage(null)}>×</button><img className="image-viewer-photo" src={openedImage.src} alt={openedImage.name} style={{ transform: `scale(${imageScale})` }} onWheel={handleImageWheel} onTouchStart={handleImageTouchStart} onTouchMove={handleImageTouchMove} onTouchEnd={() => { imagePinchRef.current = null }} onDoubleClick={resetImageZoom} onClick={(event) => event.stopPropagation()} /><span>{openedImage.name}</span></div>}
     {appLocked && <div className="app-lock-overlay" role="dialog" aria-modal="true" aria-label="Osirium заблокирован"><form className="app-lock-card" onSubmit={unlockApp}><h2>Введите код</h2><p>Osirium был заблокирован после периода бездействия.</p><input autoFocus type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={lockAttempt} onChange={(event) => setLockAttempt(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="current-password" placeholder="6 цифр" /><button>Разблокировать</button>{lockError && <span className="app-lock-error">{lockError}</span>}</form></div>}
     {!appBooting && showWelcome && !authenticated && <div className="welcome-overlay"><div className="welcome-card"><div className="welcome-logo"><span>o</span></div><p className="eyebrow">OSIRIUM</p><h2>{authMode === 'login' ? <>С возвращением<br />в Osirium</> : <>Создайте<br />свой Osirium</>}</h2><p>{authMode === 'login' ? 'Войдите, чтобы продолжить.' : 'Свобода начинается с имени.'}</p><form onSubmit={authenticate} className="auth-form"><label>Логин<input autoFocus value={username} onChange={(event) => setUsername(event.target.value.replace(/[^a-zA-Z0-9_]/g, ''))} autoComplete="username" placeholder="osirium_user" /></label><label>Пароль<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} placeholder="Минимум 8 символов" /></label><button disabled={authLoading}>{authLoading ? 'Подождите…' : authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button></form><button className="auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError('') }}>{authMode === 'login' ? 'Нет аккаунта? Создать' : 'Уже есть аккаунт? Войти'}</button>{authError && <p className="auth-error">{authError}</p>}</div></div>}
-    {openedStory && storyUrls[openedStory.story_id] && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><button type="button" className="story-viewer-close" onClick={() => setOpenedStory(null)}>×</button><div className={`story-viewer-media ratio-${openedStory.aspect_ratio.replace(':', '-')}`} onClick={(event) => event.stopPropagation()}>{openedStory.media_type === 'video' ? <video src={storyUrls[openedStory.story_id]} controls autoPlay /> : <img src={storyUrls[openedStory.story_id]} alt="История" />}<div className="story-viewer-copy"><strong>{openedStory.overlay_text}</strong><p>{openedStory.description}</p></div></div></div>}
+    {avatarCropUrl && <div className="avatar-crop-overlay" role="dialog" aria-modal="true"><div className="avatar-crop-card"><h2>Настроить аватар</h2><p>Перетаскивай фото, масштабируй колесом или ползунком.</p><div className="avatar-crop-frame" onWheel={(event) => { event.preventDefault(); setAvatarCropZoom((value) => Math.max(1, Math.min(3, value - event.deltaY * .001))) }} onPointerDown={(event) => { avatarCropDragRef.current = { x: event.clientX, y: event.clientY, offsetX: avatarCropOffset.x, offsetY: avatarCropOffset.y }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { const drag = avatarCropDragRef.current; if (drag) setAvatarCropOffset({ x: drag.offsetX + event.clientX - drag.x, y: drag.offsetY + event.clientY - drag.y }) }} onPointerUp={() => { avatarCropDragRef.current = null }}><img src={avatarCropUrl} alt="Настройка аватара" style={{ transform: `translate(${avatarCropOffset.x}px, ${avatarCropOffset.y}px) scale(${avatarCropZoom})` }} /></div><label className="avatar-crop-zoom">Масштаб<input type="range" min="1" max="3" step="0.01" value={avatarCropZoom} onChange={(event) => setAvatarCropZoom(Number(event.target.value))} /></label>{avatarCropFile?.type === 'image/gif' && <small>GIF сохранится анимированным; для него используется исходный кадр без обрезки.</small>}<div><button type="button" className="avatar-crop-cancel" onClick={() => { if (avatarCropUrl) URL.revokeObjectURL(avatarCropUrl); setAvatarCropUrl(null); setAvatarCropFile(null) }}>Отмена</button><button type="button" className="avatar-crop-save" onClick={() => { void saveAvatarCrop() }} disabled={avatarUploading}>{avatarUploading ? 'Сохраняем…' : 'Сохранить аватар'}</button></div></div></div>}
+    {openedStory && storyUrls[openedStory.story_id] && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className={`story-viewer-media ratio-${openedStory.aspect_ratio.replace(':', '-')}`} onClick={(event) => event.stopPropagation()}>{openedStory.media_type === 'video' ? <video src={storyUrls[openedStory.story_id]} controls autoPlay /> : <img src={storyUrls[openedStory.story_id]} alt="История" />}{openedStory.user_id === currentUserId && <button type="button" className="story-viewers-toggle" onClick={() => { setStoryViewersOpen((value) => !value); if (!storyViewersOpen) void loadStoryViewers(openedStory.story_id) }}>Зрители{storyViewers.length ? ` · ${storyViewers.length}` : ''}</button>}<div className="story-viewer-copy"><strong>{openedStory.overlay_text}</strong><p>{openedStory.description}</p></div>{openedStory.user_id !== currentUserId && <form className="story-reply" onSubmit={replyToStory}><input value={storyReply} onChange={(event) => setStoryReply(event.target.value.slice(0, 500))} placeholder="Написать сообщение" maxLength={500} /><button type="button" className={`story-reaction ${storyReaction ? 'active' : ''}`} aria-label="Поставить реакцию" onClick={() => { void reactToStory() }}><img src="/story-reaction.png" alt="" /></button><button className="story-reply-send" disabled={storyReplying || !storyReply.trim()} aria-label="Отправить ответ"><ArrowRightIcon /></button></form>}{storyViewersOpen && openedStory.user_id === currentUserId && <div className="story-viewers"><strong>Зрители</strong>{storyViewerError && <small>{storyViewerError}</small>}{storyViewers.length ? storyViewers.map((viewer) => <div className="story-viewer-user" key={viewer.user_id}><span className="avatar" style={{ backgroundColor: viewer.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(viewer.avatar_path) ? <img src={profileAvatarUrl(viewer.avatar_path) as string} alt="" /> : initials(viewer.display_name || viewer.username)}</span><span>{viewer.display_name || `@${viewer.username}`}<small>{formatTime(viewer.viewed_at)}</small></span>{viewer.reaction === 'heart' && <img src="/story-reaction.png" alt="Реакция" />}</div>) : <p>Пока никто не посмотрел.</p>}</div>}{storyViewerError && !storyViewersOpen && <span className="story-viewer-error">{storyViewerError}</span>}</div></div>}
     {selectedProfile && <form className="contact-sheet" onSubmit={saveContact}><span>КОНТАКТ</span><label>Как записать человека<input value={contactLabel} onChange={(event) => setContactLabel(event.target.value.slice(0, 48))} maxLength={48} placeholder="Имя контакта" /></label><button disabled={contactSaving}>{contactSaving ? 'Сохраняем…' : contacts[selectedProfile.id] ? 'Сохранить имя' : 'Добавить в контакты'}</button>{contactError && <small>{contactError}</small>}</form>}
   </main>
 }
