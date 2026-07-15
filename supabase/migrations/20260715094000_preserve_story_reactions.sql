@@ -1,4 +1,5 @@
 drop function if exists public.record_story_view(uuid, text);
+drop function if exists public.record_story_view(uuid, text, boolean);
 
 create function public.record_story_view(p_story_id uuid, p_reaction text default null, p_clear_reaction boolean default false)
 returns void

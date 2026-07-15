@@ -93,3 +93,5 @@ html[data-theme=light]{background:#f6f6f7}html[data-theme=light] .sidebar{box-sh
 .stories-row{padding:4px 5px 6px}
 ::view-transition-old(root){z-index:1;animation:none}::view-transition-new(root){z-index:2;animation:theme-watercolor .52s cubic-bezier(.22,.8,.2,1) both}@keyframes theme-watercolor{from{clip-path:circle(0 at var(--theme-origin-x,50%) var(--theme-origin-y,50%));filter:blur(10px)}to{clip-path:circle(150vmax at var(--theme-origin-x,50%) var(--theme-origin-y,50%));filter:blur(0)}}@media(prefers-reduced-motion:reduce){::view-transition-new(root){animation:none}}
 ::view-transition-new(root){animation-duration:.85s}
+html[data-theme=light] .mobile-page-back,html[data-theme=light] .mobile-admin-return{color:#26262c!important}
+.app-shell:has(.osi-page) .page-view.settings-view:not(.osi-page),.app-shell:has(.story-settings-page) .page-view.settings-view:not(.story-settings-page),.app-shell:has(.notifications-page) .page-view.settings-view:not(.notifications-page),.app-shell:has(.appearance-page) .page-view.settings-view:not(.appearance-page){display:none!important}

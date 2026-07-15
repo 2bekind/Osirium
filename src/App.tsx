@@ -432,19 +432,28 @@ export default function App() {
     const permission = await Notification.requestPermission()
     setNotificationPermission(permission)
     if (permission !== 'granted' || !supabase || !currentUserId || !('serviceWorker' in navigator) || !('PushManager' in window)) return
-    const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
-    if (!vapidPublicKey) return
-    const registration = await navigator.serviceWorker.ready
-    const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKeyBytes(vapidPublicKey) })
-    const json = subscription.toJSON()
-    const { error } = await supabase.from('push_subscriptions').upsert({
-      endpoint: subscription.endpoint,
-      user_id: currentUserId,
-      p256dh: json.keys?.p256dh,
-      auth: json.keys?.auth,
-    }, { onConflict: 'endpoint' })
-    if (error) setChatError('Не удалось сохранить устройство для уведомлений.')
+    const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY || 'BOlx31pxPjpvr4hw1alTWnv6aLO13qkvQme3AQIk6RpaOLLMdoqJul8A7NND7YRablzhOB9f1NOozbeZr5osCZA'
+    try {
+      const registration = await navigator.serviceWorker.ready
+      const subscription = await registration.pushManager.getSubscription() ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKeyBytes(vapidPublicKey) })
+      const json = subscription.toJSON()
+      const { error } = await supabase.from('push_subscriptions').upsert({
+        endpoint: subscription.endpoint,
+        user_id: currentUserId,
+        p256dh: json.keys?.p256dh,
+        auth: json.keys?.auth,
+      }, { onConflict: 'endpoint' })
+      if (error) throw error
+    } catch {
+      setChatError('Не удалось подключить это устройство к уведомлениям. Откройте Osirium с иконки на экране Домой и попробуйте ещё раз.')
+    }
   }
+
+  useEffect(() => {
+    if (activeNav === 'Настройки' && settingsSection === 'Уведомления' && notificationPermission === 'granted') {
+      void requestNotificationPermission()
+    }
+  }, [activeNav, notificationPermission, settingsSection])
 
   function notifyRecipient(message: Message) {
     if (!supabase || selectedConversation === favoritesConversationId) return
