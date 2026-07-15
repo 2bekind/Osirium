@@ -16,6 +16,7 @@ import {
   SettingsIcon,
   ShieldIcon,
   Shield2Icon,
+  StarIcon,
   TrashIcon,
 } from '@astraicons/react/linear'
 import { type Session } from '@supabase/supabase-js'
@@ -340,7 +341,7 @@ export default function App() {
   const messageHoldTimerRef = useRef<number | null>(null)
   const scrollToLatestMessageRef = useRef(false)
 
-  const favoriteChat: Chat | null = currentUserId ? { id: currentUserId, username: 'избранное', display_name: 'Избранное', avatar_color: '#303030', avatar_path: null, is_admin: false, badge: null, is_banned: false, last_seen_at: new Date().toISOString(), conversation_id: favoritesConversationId, last_body: 'Локальное облако заметок', last_created_at: null, last_sender_id: currentUserId } : null
+  const favoriteChat: Chat | null = currentUserId ? { id: currentUserId, username: 'избранное', display_name: 'Избранное', avatar_color: '#376eb3', avatar_path: null, is_admin: false, badge: null, is_banned: false, last_seen_at: new Date().toISOString(), conversation_id: favoritesConversationId, last_body: 'Локальное облако заметок', last_created_at: null, last_sender_id: currentUserId } : null
   const selectedChat = selectedConversation === favoritesConversationId ? favoriteChat : chats.find((item) => item.conversation_id === selectedConversation) ?? null
   const navIndex = ['Чаты', 'Контакты', 'Настройки'].indexOf(activeNav)
   const query = search.trim().toLowerCase()
@@ -925,7 +926,7 @@ export default function App() {
     if (!supabase) return
     const { data, error } = await supabase.rpc('list_story_viewers', { p_story_id: storyId })
     if (error) {
-      setStoryViewerError('Не удалось загрузить зрителей.')
+      setStoryViewerError(`Не удалось загрузить зрителей: ${error.message}`)
       return
     }
     setStoryViewers((data ?? []) as StoryViewer[])
@@ -1337,7 +1338,7 @@ export default function App() {
 
   const renderChatRow = (chat: Chat) => (
     <button key={chat.conversation_id} onClick={() => { void selectChat(chat) }} className={`chat-row ${chat.conversation_id === selectedConversation ? 'selected' : ''}`}>
-      <span className="avatar" style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(chat.display_name || chat.username)}</span>
+      <span className={`avatar ${chat.conversation_id === favoritesConversationId ? 'favorites-avatar' : ''}`} style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{chat.conversation_id === favoritesConversationId ? <StarIcon /> : profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(chat.display_name || chat.username)}</span>
       <span className="chat-copy">
         <span className="chat-line"><strong>{chat.display_name || `@${chat.username}`}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}</time></span>
         <span className={`chat-line ${formatPresence(chat.last_seen_at) === 'в сети' ? 'presence-online' : ''}`}><small>{formatPresence(chat.last_seen_at)} · {formatPreview(chat.last_body)}</small></span>
