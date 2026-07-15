@@ -360,8 +360,9 @@ export default function App() {
 
   useEffect(() => {
     if (!supabase || !authenticated || !currentUserId) return
+    const client = supabase
     const touchPresence = () => {
-      if (document.visibilityState === 'visible') void supabase.rpc('touch_presence')
+      if (document.visibilityState === 'visible') void client.rpc('touch_presence')
     }
     touchPresence()
     const interval = window.setInterval(touchPresence, 30_000)
