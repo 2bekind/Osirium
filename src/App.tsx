@@ -240,6 +240,20 @@ function profileAvatarUrl(path: string | null) {
   return path && supabase ? supabase.storage.from('avatars').getPublicUrl(path).data.publicUrl : null
 }
 
+async function resolveWithin<T>(promise: PromiseLike<T>, timeoutMs = 7000): Promise<T> {
+  let timer = 0
+  try {
+    return await Promise.race([
+      Promise.resolve(promise),
+      new Promise<never>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error('Request timed out')), timeoutMs)
+      }),
+    ])
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
 function formatPublicId(value: number | null) {
   return value === null ? '' : String(value).padStart(12, '0')
 }
@@ -400,6 +414,11 @@ export default function App() {
   const notificationAudioRef = useRef<HTMLAudioElement | null>(null)
   const imagePinchRef = useRef<{ distance: number; scale: number } | null>(null)
   const bootStartedAtRef = useRef(Date.now())
+
+  useEffect(() => {
+    const fallback = window.setTimeout(() => setAppBooting(false), 8000)
+    return () => window.clearTimeout(fallback)
+  }, [])
   const messageHoldTimerRef = useRef<number | null>(null)
   const chatHoldTimerRef = useRef<number | null>(null)
   const scrollToLatestMessageRef = useRef(false)
@@ -588,7 +607,9 @@ export default function App() {
         return
       }
 
-      const { data: privacyProfile } = await client.from('profiles').select('username, display_name, bio, avatar_path, public_id, osi_balance').eq('id', user.id).maybeSingle()
+      const { data: privacyProfile } = await resolveWithin(
+        client.from('profiles').select('username, display_name, bio, avatar_path, public_id, osi_balance').eq('id', user.id).maybeSingle(),
+      ).catch(() => ({ data: null }))
       if (!active) return
 
       const profile = privacyProfile as PrivacyProfile | null
@@ -607,11 +628,18 @@ export default function App() {
       if (lock?.passwordHash && lock.passwordSalt && window.localStorage.getItem(appLockedStorageKey(user.id)) === '1') {
         setAppLocked(true)
       }
-      await Promise.allSettled([loadChats(), loadStories(), loadContacts()])
+      await Promise.allSettled([
+        resolveWithin(loadChats()),
+        resolveWithin(loadStories()),
+        resolveWithin(loadContacts()),
+      ])
       finishBoot()
     }
 
-    void client.auth.getSession().then(({ data }) => hydrate(data.session)).catch(finishBoot)
+    void resolveWithin(client.auth.getSession()).then(({ data }) => hydrate(data.session)).catch(() => {
+      setShowWelcome(true)
+      finishBoot()
+    })
     const { data: listener } = client.auth.onAuthStateChange((_event, session) => { void hydrate(session).catch(finishBoot) })
     return () => {
       active = false
