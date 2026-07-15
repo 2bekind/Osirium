@@ -224,6 +224,7 @@ export default function App() {
   const photoInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLInputElement>(null)
   const avatarInputRef = useRef<HTMLInputElement>(null)
+  const notificationAudioRef = useRef<HTMLAudioElement | null>(null)
   const imagePinchRef = useRef<{ distance: number; scale: number } | null>(null)
   const bootStartedAtRef = useRef(Date.now())
   const messageHoldTimerRef = useRef<number | null>(null)
@@ -400,13 +401,20 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'messages', filter: `conversation_id=eq.${selectedConversation}` }, (payload) => {
         const message = payload.new as Message
         setMessages((current) => current.some((item) => item.id === message.id) ? current.map((item) => item.id === message.id ? { ...item, ...message } : item) : [...current, message])
+        if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId) {
+          const sound = notificationAudioRef.current
+          if (sound) {
+            sound.currentTime = 0
+            void sound.play().catch(() => undefined)
+          }
+        }
         void loadImageUrls([message])
         void loadChats()
       })
       .subscribe()
 
     return () => { void client.removeChannel(channel) }
-  }, [loadChats, loadImageUrls, selectedConversation])
+  }, [currentUserId, loadChats, loadImageUrls, selectedConversation])
 
   useEffect(() => () => {
     callStreamRef.current?.getTracks().forEach((track) => track.stop())
@@ -888,6 +896,7 @@ export default function App() {
   )
 
   return <main className={`app-shell ${mobileSettingsOpen ? 'mobile-settings-open' : ''}`}>
+    <audio ref={notificationAudioRef} src="/message-notification.mp3" preload="auto" />
     {appBooting && <div className="app-loader" role="status" aria-label="Загрузка Osirium"><div className="app-loader-mark" /><p>OSIRIUM</p><span>Загружаем пространство</span><i /></div>}
     <aside className="sidebar">
       <div className="sidebar-head"><h1>{activeNav === 'Чаты' ? 'Сообщения' : activeNav}</h1>{activeNav !== 'Настройки' && <button className="icon-button" aria-label="Новый диалог" onClick={() => { setActiveNav('Чаты'); setSearch('') }}><PlusIcon /></button>}</div>
