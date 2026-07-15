@@ -1,4 +1,5 @@
-import { type ChangeEvent, type CSSProperties, FormEvent, type TouchEvent, useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react'
+import { type ChangeEvent, type CSSProperties, FormEvent, type MouseEvent as ReactMouseEvent, type TouchEvent, useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from 'react'
+import { flushSync } from 'react-dom'
 import {
   ArrowRightIcon,
   CallIcon,
@@ -245,6 +246,12 @@ function messageDateLabel(value: string) {
   return new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'long', year: messageDate.getFullYear() === today.getFullYear() ? undefined : 'numeric' }).format(messageDate)
 }
 
+function vapidKeyBytes(value: string) {
+  const padding = '='.repeat((4 - value.length % 4) % 4)
+  const source = atob((value + padding).replace(/-/g, '+').replace(/_/g, '/'))
+  return Uint8Array.from(source, (character) => character.charCodeAt(0))
+}
+
 export default function App() {
   const [chats, setChats] = useState<Chat[]>([])
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null)
@@ -276,7 +283,7 @@ export default function App() {
   const [currentDisplayName, setCurrentDisplayName] = useState('')
   const [profileBio, setProfileBio] = useState('')
   const [currentAvatarUrl, setCurrentAvatarUrl] = useState<string | null>(null)
-  const [settingsSection, setSettingsSection] = useState<'Профиль' | 'Оси' | 'Истории' | 'Уведомления' | 'Конфиденциальность' | 'Опасная зона' | 'Админ-панель'>('Профиль')
+  const [settingsSection, setSettingsSection] = useState<'Профиль' | 'Оси' | 'Истории' | 'Уведомления' | 'Оформление' | 'Конфиденциальность' | 'Опасная зона' | 'Админ-панель'>('Профиль')
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false)
   const [adminSearch, setAdminSearch] = useState('')
   const [adminResults, setAdminResults] = useState<Profile[]>([])
@@ -305,6 +312,7 @@ export default function App() {
   const [password, setPassword] = useState('')
   const [authError, setAuthError] = useState('')
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | 'unsupported'>(() => 'Notification' in window ? Notification.permission : 'unsupported')
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => window.localStorage.getItem('osirium:theme') === 'light' ? 'light' : 'dark')
   const [authLoading, setAuthLoading] = useState(false)
   const [chatError, setChatError] = useState('')
   const [sending, setSending] = useState(false)
@@ -371,6 +379,25 @@ export default function App() {
       .sort((left, right) => Number(right.is_pinned) - Number(left.is_pinned) || new Date(right.last_created_at || 0).getTime() - new Date(left.last_created_at || 0).getTime()),
     [chats, query],
   )
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    window.localStorage.setItem('osirium:theme', theme)
+  }, [theme])
+
+  function switchTheme(nextTheme: 'dark' | 'light', event: ReactMouseEvent<HTMLButtonElement>) {
+    if (nextTheme === theme) return
+    const button = event.currentTarget.getBoundingClientRect()
+    document.documentElement.style.setProperty('--theme-origin-x', `${button.left + button.width / 2}px`)
+    document.documentElement.style.setProperty('--theme-origin-y', `${button.top + button.height / 2}px`)
+    const applyTheme = () => {
+      document.documentElement.dataset.theme = nextTheme
+      window.localStorage.setItem('osirium:theme', nextTheme)
+      flushSync(() => setTheme(nextTheme))
+    }
+    const transitionDocument = document as Document & { startViewTransition?: (callback: () => void) => unknown }
+    if (transitionDocument.startViewTransition) transitionDocument.startViewTransition(applyTheme)
+    else applyTheme()
+  }
   const storiesByAge = useMemo(
     () => [...stories].sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime()),
     [stories],
@@ -404,6 +431,24 @@ export default function App() {
     }
     const permission = await Notification.requestPermission()
     setNotificationPermission(permission)
+    if (permission !== 'granted' || !supabase || !currentUserId || !('serviceWorker' in navigator) || !('PushManager' in window)) return
+    const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
+    if (!vapidPublicKey) return
+    const registration = await navigator.serviceWorker.ready
+    const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKeyBytes(vapidPublicKey) })
+    const json = subscription.toJSON()
+    const { error } = await supabase.from('push_subscriptions').upsert({
+      endpoint: subscription.endpoint,
+      user_id: currentUserId,
+      p256dh: json.keys?.p256dh,
+      auth: json.keys?.auth,
+    }, { onConflict: 'endpoint' })
+    if (error) setChatError('Не удалось сохранить устройство для уведомлений.')
+  }
+
+  function notifyRecipient(message: Message) {
+    if (!supabase || selectedConversation === favoritesConversationId) return
+    void supabase.functions.invoke('send-push', { body: { message_id: message.id } })
   }
 
   const loadStories = useCallback(async () => {
@@ -921,6 +966,7 @@ export default function App() {
       ? { ...item, last_body: message.body, last_created_at: message.created_at, last_sender_id: message.sender_id }
       : item))
     setDraft('')
+    notifyRecipient(message)
     window.requestAnimationFrame(() => composerInputRef.current?.focus())
   }
 
@@ -975,6 +1021,7 @@ export default function App() {
     setChats((current) => current.map((item) => item.conversation_id === selectedConversation
       ? { ...item, last_body: 'Фото', last_created_at: message.created_at, last_sender_id: message.sender_id }
       : item))
+    notifyRecipient(message)
   }
 
   function handleStorySelection(event: ChangeEvent<HTMLInputElement>) {
@@ -1077,7 +1124,7 @@ export default function App() {
   async function reactToStory() {
     if (!supabase || !openedStory || openedStory.user_id === currentUserId) return
     const nextReaction = storyReaction === 'heart' ? null : 'heart'
-    const { error } = await supabase.rpc('record_story_view', { p_story_id: openedStory.story_id, p_reaction: nextReaction })
+    const { error } = await supabase.rpc('record_story_view', { p_story_id: openedStory.story_id, p_reaction: nextReaction, p_clear_reaction: nextReaction === null })
     if (error) {
       setStoryViewerError('Не удалось поставить реакцию.')
       return
@@ -1123,6 +1170,7 @@ export default function App() {
     setChats((current) => current.map((item) => item.conversation_id === selectedConversation
       ? { ...item, last_body: 'Голосовое сообщение', last_created_at: message.created_at, last_sender_id: message.sender_id }
       : item))
+    notifyRecipient(message)
   }
 
   async function startVoiceRecording() {
@@ -1502,7 +1550,7 @@ export default function App() {
       {activeNav === 'Главная' && <div className="sidebar-note"><span>СЕГОДНЯ</span><strong>Диалогов: {chats.length}</strong><p>Найдите человека по логину и начните приватный разговор.</p></div>}
       {activeNav === 'Настройки' && <section className="settings-menu" onClick={() => setMobileSettingsOpen(true)}><p>АККАУНТ</p><button className={settingsSection === 'Профиль' ? 'active' : ''} onClick={() => setSettingsSection('Профиль')}><ProfileCircleIcon /><strong>Профиль</strong></button><button className={settingsSection === 'Оси' ? 'active' : ''} onClick={() => setSettingsSection('Оси')}><MoneyIcon /><strong>Оси</strong></button><button className={settingsSection === 'Конфиденциальность' ? 'active' : ''} onClick={() => setSettingsSection('Конфиденциальность')}><LockIcon /><strong>Конфиденциальность</strong></button>{currentIsAdmin && <><p>АДМИНИСТРАТОР</p><button className={settingsSection === 'Админ-панель' ? 'active' : ''} onClick={() => setSettingsSection('Админ-панель')}><Shield2Icon /><strong>Админ-панель</strong></button></>}<p>УПРАВЛЕНИЕ</p><button className={`danger ${settingsSection === 'Опасная зона' ? 'active' : ''}`} onClick={() => setSettingsSection('Опасная зона')}><TrashIcon /><strong>Опасная зона</strong></button></section>}
       {activeNav === 'Настройки' && <section className="settings-menu stories-settings-link"><p>ОБЩЕНИЕ</p><button className={settingsSection === 'Истории' ? 'active' : ''} onClick={() => { setSettingsSection('Истории'); setMobileSettingsOpen(true) }}><CameraIcon /><strong>Истории</strong></button></section>}
-      {activeNav === 'Настройки' && <section className="settings-menu notifications-settings-link"><p>ПРИЛОЖЕНИЕ</p><button className={settingsSection === 'Уведомления' ? 'active' : ''} onClick={() => { setSettingsSection('Уведомления'); setMobileSettingsOpen(true) }}><NotificationIcon /><strong>Уведомления</strong></button></section>}
+      {activeNav === 'Настройки' && <section className="settings-menu notifications-settings-link"><p>ПРИЛОЖЕНИЕ</p><button className={settingsSection === 'Уведомления' ? 'active' : ''} onClick={() => { setSettingsSection('Уведомления'); setMobileSettingsOpen(true) }}><NotificationIcon /><strong>Уведомления</strong></button><button className={settingsSection === 'Оформление' ? 'active' : ''} onClick={() => { setSettingsSection('Оформление'); setMobileSettingsOpen(true) }}><SettingsIcon /><strong>Оформление</strong></button></section>}
       {activeNav === 'Профиль' && <section className="settings-menu profile-account-menu" onClick={() => setMobileSettingsOpen(true)}><p>АККАУНТ</p><button className={settingsSection === 'Профиль' ? 'active' : ''} onClick={() => setSettingsSection('Профиль')}><ProfileCircleIcon /><strong>Профиль</strong></button><button className={settingsSection === 'Оси' ? 'active' : ''} onClick={() => setSettingsSection('Оси')}><MoneyIcon /><strong>Оси</strong></button><button className={settingsSection === 'Конфиденциальность' ? 'active' : ''} onClick={() => setSettingsSection('Конфиденциальность')}><LockIcon /><strong>Конфиденциальность</strong></button><button className={settingsSection === 'Истории' ? 'active' : ''} onClick={() => { setSettingsSection('Истории'); setMobileSettingsOpen(true) }}><CameraIcon /><strong>Истории</strong></button></section>}
       <nav className="bottom-nav" aria-label="Основная навигация" style={{ '--active-offset': `calc(${navIndex * 100}% + ${navIndex * 6}px)` } as CSSProperties}>
         {[['Чаты', MessageIcon], ['Профиль', ProfileCircleIcon], ['Настройки', SettingsIcon]].map(([label, Icon]) => <button key={label as string} onClick={() => { setSelectedProfile(null); setActiveNav(label as string); if (label === 'Настройки') setMobileSettingsOpen(false) }} className={activeNav === label ? 'active' : ''}><Icon /><span>{label as string}</span></button>)}
@@ -1516,6 +1564,7 @@ export default function App() {
     {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <div className="page-view settings-view admin-page admin-page-secondary"><p className="eyebrow">ДОСТУП И ВАЛЮТА</p><h2>Блокировка и Оси</h2><p className="settings-description">Выдавайте Оси или блокируйте аккаунты. Заблокированный пользователь не сможет войти и писать сообщения.</p><div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={`controls-${profile.id}`}><div><strong>@{profile.username}</strong><small>{profile.is_banned ? 'Заблокирован' : 'Активен'}</small></div><div className="admin-badge-actions"><input className="osi-amount-input" type="number" min="1" step="1" value={osiAmount} onChange={(event) => setOsiAmount(event.target.value)} aria-label="Количество Оси" /><button className="badge-idea" onClick={() => { void grantOsi(profile) }}>Выдать Оси</button><button className={profile.is_banned ? 'badge-unban' : 'badge-ban'} onClick={() => { void setUserBan(profile, !profile.is_banned) }}>{profile.is_banned ? 'Разблокировать' : 'Заблокировать'}</button></div></div>)}</div></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Истории' && <div className="page-view settings-view story-settings-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ИСТОРИИ</p><h2>Поделиться историей</h2><p className="settings-description">Истории видят только люди, с которыми у вас уже есть диалог. Через 24 часа они исчезают.</p><form className="story-form" onSubmit={publishStory}><input ref={storyInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" onChange={handleStorySelection} /><button type="button" className="story-add" onClick={() => storyInputRef.current?.click()}>Добавить историю</button><label>Размер<select value={storyAspectRatio} onChange={(event) => setStoryAspectRatio(event.target.value)}><option value="9:16">Вертикальный · 9:16</option><option value="1:1">Квадрат · 1:1</option><option value="16:9">Горизонтальный · 16:9</option></select></label>{storyPreviewUrl && <div className={`story-preview ratio-${storyAspectRatio.replace(':', '-')}`}>{storyFile?.type.startsWith('video/') ? <video src={storyPreviewUrl} controls /> : <img src={storyPreviewUrl} alt="Предпросмотр истории" />}{storyOverlayText && <strong>{storyOverlayText}</strong>}</div>}<label>Надпись на истории<input value={storyOverlayText} onChange={(event) => setStoryOverlayText(event.target.value.slice(0, 80))} maxLength={80} placeholder="Например, доброе утро" /></label><label>Описание<textarea value={storyDescription} onChange={(event) => setStoryDescription(event.target.value.slice(0, 180))} maxLength={180} placeholder="Описание истории" /></label><button className="story-publish" disabled={!storyFile || storyUploading}>{storyUploading ? 'Публикуем…' : 'Опубликовать'}</button>{storyError && <p className="privacy-error">{storyError}</p>}</form></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Уведомления' && <div className="page-view settings-view notifications-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">УВЕДОМЛЕНИЯ</p><h2>Уведомления на iPhone</h2><p className="settings-description">Push-уведомления появятся после завершения настройки. На iPhone они работают только у Osirium, добавленного на экран «Домой».</p>{notificationPermission === 'default' && <button type="button" className="notification-enable" onClick={() => { void requestNotificationPermission() }}>Включить уведомления</button>}{notificationPermission === 'granted' && <p className="notification-status granted">Уведомления разрешены для этого устройства.</p>}{notificationPermission === 'denied' && <p className="notification-status">Уведомления запрещены. Включите их в настройках Osirium на устройстве.</p>}{notificationPermission === 'unsupported' && <p className="notification-status">Этот браузер не поддерживает уведомления.</p>}<ol className="notification-steps"><li>Откройте <b>www.osirium.lol</b> в Safari.</li><li>Нажмите кнопку «Поделиться» внизу браузера.</li><li>Выберите «На экран Домой» и подтвердите добавление.</li><li>Откройте Osirium с иконки на экране Домой.</li><li>В этом разделе появится кнопка включения уведомлений.</li></ol><p className="notification-note">Не запрашивайте разрешение в обычной вкладке Safari: iOS выдаёт его только веб‑приложению с экрана Домой.</p></div>}
+    {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Оформление' && <div className="page-view settings-view appearance-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ПРИЛОЖЕНИЕ</p><h2>Оформление</h2><p className="settings-description">Выберите тему, которая будет использоваться на этом устройстве.</p><section className="theme-settings"><strong>Тема</strong><div><button type="button" className={theme === 'dark' ? 'active' : ''} onClick={(event) => switchTheme('dark', event)}>Тёмная</button><button type="button" className={theme === 'light' ? 'active' : ''} onClick={(event) => switchTheme('light', event)}>Белая</button></div></section></div>}
     {mobileSettingsOpen && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <button type="button" className="mobile-admin-return" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button>}
     <section className={`conversation ${selectedChat ? 'is-open' : ''} ${selectedConversation === favoritesConversationId ? 'favorites' : ''}`}>
       {selectedProfile && <div className="profile-view"><button className="profile-back" onClick={() => { setSelectedProfile(null); setSelectedProfileBio('') }}>← Назад</button><span className="avatar profile-large" style={{ backgroundColor: selectedProfile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedProfile.avatar_path) ? <img src={profileAvatarUrl(selectedProfile.avatar_path) as string} alt="" /> : initials(selectedProfile.display_name || selectedProfile.username)}</span><h2>{selectedProfile.display_name || `@${selectedProfile.username}`}<RoleBadge isAdmin={selectedProfile.is_admin} badge={selectedProfile.badge} /></h2><p className="profile-status">@{selectedProfile.username}</p><div className="profile-info"><span>ОПИСАНИЕ</span><p>{selectedProfileLoading ? 'Загружаем…' : selectedProfileBio || `${selectedProfile.display_name || `@${selectedProfile.username}`} ещё не придумал что можно написать в описание ;<`}</p></div><button className="page-action" onClick={() => { void selectChat(selectedProfile) }}>Открыть диалог <ArrowRightIcon /></button></div>}
@@ -1540,7 +1589,7 @@ export default function App() {
     {!appBooting && showWelcome && !authenticated && <div className="welcome-overlay"><div className="welcome-card"><div className="welcome-logo"><span>o</span></div><p className="eyebrow">OSIRIUM</p><h2>{authMode === 'login' ? <>С возвращением<br />в Osirium</> : <>Создайте<br />свой Osirium</>}</h2><p>{authMode === 'login' ? 'Войдите, чтобы продолжить.' : 'Свобода начинается с имени.'}</p><form onSubmit={authenticate} className="auth-form"><label>Логин<input autoFocus value={username} onChange={(event) => setUsername(event.target.value.replace(/[^a-zA-Z0-9_]/g, ''))} autoComplete="username" placeholder="osirium_user" /></label><label>Пароль<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} placeholder="Минимум 8 символов" /></label><button disabled={authLoading}>{authLoading ? 'Подождите…' : authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button></form><button className="auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError('') }}>{authMode === 'login' ? 'Нет аккаунта? Создать' : 'Уже есть аккаунт? Войти'}</button>{authError && <p className="auth-error">{authError}</p>}</div></div>}
     {avatarCropUrl && <div className="avatar-crop-overlay" role="dialog" aria-modal="true"><div className="avatar-crop-card"><h2>Настроить аватар</h2><p>Перетаскивай фото, масштабируй колесом или ползунком.</p><div className="avatar-crop-frame" onWheel={(event) => { event.preventDefault(); setAvatarCropZoom((value) => Math.max(1, Math.min(3, value - event.deltaY * .001))) }} onPointerDown={(event) => { avatarCropDragRef.current = { x: event.clientX, y: event.clientY, offsetX: avatarCropOffset.x, offsetY: avatarCropOffset.y }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { const drag = avatarCropDragRef.current; if (drag) setAvatarCropOffset({ x: drag.offsetX + event.clientX - drag.x, y: drag.offsetY + event.clientY - drag.y }) }} onPointerUp={() => { avatarCropDragRef.current = null }}><img src={avatarCropUrl} alt="Настройка аватара" style={{ transform: `translate(${avatarCropOffset.x}px, ${avatarCropOffset.y}px) scale(${avatarCropZoom})` }} /></div><label className="avatar-crop-zoom">Масштаб<input type="range" min="1" max="3" step="0.01" value={avatarCropZoom} onChange={(event) => setAvatarCropZoom(Number(event.target.value))} /></label>{avatarCropFile?.type === 'image/gif' && <small>GIF сохранится анимированным; для него используется исходный кадр без обрезки.</small>}<div><button type="button" className="avatar-crop-cancel" onClick={() => { if (avatarCropUrl) URL.revokeObjectURL(avatarCropUrl); setAvatarCropUrl(null); setAvatarCropFile(null) }}>Отмена</button><button type="button" className="avatar-crop-save" onClick={() => { void saveAvatarCrop() }} disabled={avatarUploading}>{avatarUploading ? 'Сохраняем…' : 'Сохранить аватар'}</button></div></div></div>}
     {openedStory && !storyUrls[openedStory.story_id] && storyViewerError && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className="story-access-error" onClick={(event) => event.stopPropagation()}><strong>История недоступна</strong><span>{storyViewerError}</span></div></div>}
-    {openedStory && storyUrls[openedStory.story_id] && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className={`story-viewer-media ratio-${openedStory.aspect_ratio.replace(':', '-')}`} onClick={(event) => event.stopPropagation()}>{openedStory.media_type === 'video' ? <video className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} controls autoPlay onCanPlay={() => setStoryMediaLoaded(true)} /> : <img className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} alt="История" onLoad={() => setStoryMediaLoaded(true)} />}{previousStory && <button type="button" className="story-step story-step-previous" aria-label="Предыдущая история" onClick={() => { void openStory(previousStory) }}><ArrowRightIcon /></button>}{nextStory && <button type="button" className="story-step story-step-next" aria-label="Следующая история" onClick={() => { void openStory(nextStory) }}><ArrowRightIcon /></button>}{openedStory.user_id === currentUserId && <button type="button" className="story-viewers-toggle" onClick={() => { setStoryViewersOpen((value) => !value); if (!storyViewersOpen) void loadStoryViewers(openedStory.story_id) }}>Зрители{storyViewers.length ? ` · ${storyViewers.length}` : ''}</button>}<div className="story-viewer-copy"><strong>{openedStory.overlay_text}</strong><p>{openedStory.description}</p></div>{openedStory.user_id !== currentUserId && <form className="story-reply" onSubmit={replyToStory}><input value={storyReply} onChange={(event) => setStoryReply(event.target.value.slice(0, 500))} placeholder="Написать сообщение" maxLength={500} /><button type="button" className={`story-reaction ${storyReaction ? 'active' : ''}`} aria-label="Поставить реакцию" onClick={() => { void reactToStory() }}><img src="/story-reaction.png" alt="" /></button><button className="story-reply-send" disabled={storyReplying || !storyReply.trim()} aria-label="Отправить ответ"><ArrowRightIcon /></button></form>}{storyViewersOpen && openedStory.user_id === currentUserId && <div className="story-viewers"><strong>Зрители</strong>{storyViewerError && <small>{storyViewerError}</small>}{storyViewers.length ? storyViewers.map((viewer) => <div className="story-viewer-user" key={viewer.user_id}><span className="avatar" style={{ backgroundColor: viewer.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(viewer.avatar_path) ? <img src={profileAvatarUrl(viewer.avatar_path) as string} alt="" /> : initials(viewer.display_name || viewer.username)}</span><span>{viewer.display_name || `@${viewer.username}`}<small>{formatTime(viewer.viewed_at)}</small></span>{viewer.reaction === 'heart' && <img src="/story-reaction.png" alt="Реакция" />}</div>) : <p>Пока никто не посмотрел.</p>}</div>}{storyViewerError && !storyViewersOpen && <span className="story-viewer-error">{storyViewerError}</span>}</div></div>}
+    {openedStory && storyUrls[openedStory.story_id] && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className={`story-viewer-media ratio-${openedStory.aspect_ratio.replace(':', '-')}`} onClick={(event) => event.stopPropagation()}>{openedStory.media_type === 'video' ? <video className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} controls autoPlay onCanPlay={() => setStoryMediaLoaded(true)} /> : <img className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} alt="История" onLoad={() => setStoryMediaLoaded(true)} />}{previousStory && <button type="button" className="story-step story-step-previous" aria-label="Предыдущая история" onClick={() => { void openStory(previousStory) }}><ArrowRightIcon /></button>}{nextStory && <button type="button" className="story-step story-step-next" aria-label="Следующая история" onClick={() => { void openStory(nextStory) }}><ArrowRightIcon /></button>}{openedStory.user_id === currentUserId && <button type="button" className="story-viewers-toggle" onClick={() => { setStoryViewersOpen((value) => !value); if (!storyViewersOpen) void loadStoryViewers(openedStory.story_id) }}>Зрители{storyViewers.length ? ` · ${storyViewers.length}` : ''}</button>}<div className="story-viewer-copy"><strong>{openedStory.overlay_text}</strong><p>{openedStory.description}</p></div>{openedStory.user_id !== currentUserId && <form className="story-reply" onSubmit={replyToStory}><input value={storyReply} onChange={(event) => setStoryReply(event.target.value.slice(0, 500))} placeholder="Написать сообщение" maxLength={500} /><button type="button" className={`story-reaction ${storyReaction ? 'active' : ''}`} aria-label="Поставить реакцию" onClick={() => { void reactToStory() }}><img src="/story-reaction.png" alt="" /></button><button className="story-reply-send" disabled={storyReplying || !storyReply.trim()} aria-label="Отправить ответ"><ArrowRightIcon /></button></form>}{storyViewersOpen && openedStory.user_id === currentUserId && <div className="story-viewers"><strong>Зрители</strong>{storyViewerError && <small>{storyViewerError}</small>}{storyViewers.length ? storyViewers.map((viewer) => <div className="story-viewer-user" key={viewer.user_id}><span className="avatar" style={{ backgroundColor: viewer.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(viewer.avatar_path) ? <img src={profileAvatarUrl(viewer.avatar_path) as string} alt="" /> : initials(viewer.display_name || viewer.username)}</span><span>{viewer.display_name || `@${viewer.username}`}<small>Просмотрено в {formatTime(viewer.viewed_at)}</small></span>{viewer.reaction === 'heart' && <img src="/story-reaction.png" alt="Реакция" />}</div>) : <p>Пока никто не посмотрел.</p>}</div>}{storyViewerError && !storyViewersOpen && <span className="story-viewer-error">{storyViewerError}</span>}</div></div>}
     {selectedProfile && <form className="contact-sheet" onSubmit={saveContact}><span>КОНТАКТ</span><label>Как записать человека<input value={contactLabel} onChange={(event) => setContactLabel(event.target.value.slice(0, 48))} maxLength={48} placeholder="Имя контакта" /></label><button disabled={contactSaving}>{contactSaving ? 'Сохраняем…' : contacts[selectedProfile.id] ? 'Сохранить имя' : 'Добавить в контакты'}</button>{contactError && <small>{contactError}</small>}</form>}
   </main>
 }
