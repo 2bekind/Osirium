@@ -228,6 +228,7 @@ export default function App() {
   const imagePinchRef = useRef<{ distance: number; scale: number } | null>(null)
   const bootStartedAtRef = useRef(Date.now())
   const messageHoldTimerRef = useRef<number | null>(null)
+  const scrollToLatestMessageRef = useRef(false)
 
   const selectedChat = chats.find((item) => item.conversation_id === selectedConversation) ?? null
   const navIndex = ['Чаты', 'Контакты', 'Настройки'].indexOf(activeNav)
@@ -276,6 +277,7 @@ export default function App() {
       return
     }
     const records = (data ?? []) as Message[]
+    scrollToLatestMessageRef.current = true
     setMessages(records)
     void loadImageUrls(records)
     void loadPinnedMessage(conversationId)
@@ -428,6 +430,16 @@ export default function App() {
 
     return () => { void client.removeChannel(channel) }
   }, [currentUserId, loadChats, loadImageUrls, selectedConversation])
+
+  useEffect(() => {
+    if (!scrollToLatestMessageRef.current) return
+    const frame = window.requestAnimationFrame(() => {
+      const container = document.querySelector<HTMLElement>('.messages')
+      if (container) container.scrollTop = container.scrollHeight
+      scrollToLatestMessageRef.current = false
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages, selectedConversation])
 
   useEffect(() => () => {
     callStreamRef.current?.getTracks().forEach((track) => track.stop())
