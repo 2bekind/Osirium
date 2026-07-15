@@ -327,9 +327,7 @@ export default function App() {
       setAppLockHash(lock?.passwordHash ?? null)
       setAppLockSalt(lock?.passwordSalt ?? null)
       setAppLockTimeout(timeout)
-      const hiddenAt = Number(window.localStorage.getItem(lockTimestampKey(user.id)) || 0)
-      if (lock?.passwordHash && lock.passwordSalt && (window.localStorage.getItem(appLockedStorageKey(user.id)) === '1' || (hiddenAt && Date.now() - hiddenAt >= timeout * 1000))) {
-        window.localStorage.setItem(appLockedStorageKey(user.id), '1')
+      if (lock?.passwordHash && lock.passwordSalt && window.localStorage.getItem(appLockedStorageKey(user.id)) === '1') {
         setAppLocked(true)
       }
       await loadChats()
@@ -345,26 +343,41 @@ export default function App() {
   }, [loadChats])
 
   useEffect(() => {
-    if (!appLockHash || !appLockSalt || !currentUserId) return
-    const markInactive = () => window.localStorage.setItem(lockTimestampKey(currentUserId), String(Date.now()))
+    if (!appLockHash || !appLockSalt || !currentUserId || appLocked) return
+    let lastStoredAt = 0
+    const recordActivity = () => {
+      const now = Date.now()
+      if (now - lastStoredAt < 1000) return
+      lastStoredAt = now
+      window.localStorage.setItem(lockTimestampKey(currentUserId), String(now))
+    }
     const checkLock = () => {
-      if (document.visibilityState !== 'visible') return
-      const hiddenAt = Number(window.localStorage.getItem(lockTimestampKey(currentUserId)) || 0)
-      if (hiddenAt && Date.now() - hiddenAt >= appLockTimeout * 1000) {
+      if (document.visibilityState !== 'visible') return false
+      const lastActivityAt = Number(window.localStorage.getItem(lockTimestampKey(currentUserId)) || 0)
+      if (lastActivityAt && Date.now() - lastActivityAt >= appLockTimeout * 1000) {
         window.localStorage.setItem(appLockedStorageKey(currentUserId), '1')
         setAppLocked(true)
+        return true
       }
+      return false
     }
-    const onVisibilityChange = () => document.visibilityState === 'hidden' ? markInactive() : checkLock()
+    if (!checkLock()) recordActivity()
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && !checkLock()) recordActivity()
+    }
+    const onFocus = () => { if (!checkLock()) recordActivity() }
+    const activityEvents: Array<keyof WindowEventMap> = ['pointerdown', 'pointermove', 'keydown', 'scroll', 'touchstart']
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, recordActivity, { passive: true }))
     document.addEventListener('visibilitychange', onVisibilityChange)
-    window.addEventListener('pagehide', markInactive)
-    window.addEventListener('focus', checkLock)
+    window.addEventListener('focus', onFocus)
+    const interval = window.setInterval(checkLock, 1000)
     return () => {
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, recordActivity))
       document.removeEventListener('visibilitychange', onVisibilityChange)
-      window.removeEventListener('pagehide', markInactive)
-      window.removeEventListener('focus', checkLock)
+      window.removeEventListener('focus', onFocus)
+      window.clearInterval(interval)
     }
-  }, [appLockHash, appLockSalt, appLockTimeout, currentUserId])
+  }, [appLockHash, appLockSalt, appLockTimeout, appLocked, currentUserId])
 
   useEffect(() => {
     if (!appLocked || !currentUserId) return
