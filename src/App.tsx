@@ -859,7 +859,11 @@ export default function App() {
       return
     }
 
-    await supabase.auth.setSession(data.session)
+    const { error: sessionError } = await supabase.auth.setSession(data.session)
+    if (sessionError) {
+      setAuthError('Не удалось сохранить вход. Попробуйте ещё раз.')
+      return
+    }
     setAuthenticated(true)
     setShowWelcome(false)
   }
