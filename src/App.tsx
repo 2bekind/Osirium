@@ -6,12 +6,15 @@ import {
   CallIcon,
   CheckIcon,
   CameraIcon,
+  CloseCircleIcon,
   GroupIcon,
   LockIcon,
   Menu2Icon,
   MessageIcon,
   MicrophoneIcon,
+  MicrophoneSlashIcon,
   MoneyIcon,
+  MonitorIcon,
   NotificationIcon,
   PlusIcon,
   ProfileCircleIcon,
@@ -21,6 +24,8 @@ import {
   Shield2Icon,
   StarIcon,
   TrashIcon,
+  VolumeHighIcon,
+  VolumeXIcon,
 } from '@astraicons/react/linear'
 import { type Session } from '@supabase/supabase-js'
 import { hasSupabase, supabase } from './supabase'
@@ -88,7 +93,7 @@ type CallSignal = {
   sender_id: string
   recipient_id: string
   kind: 'offer' | 'answer' | 'ice' | 'hangup' | 'decline'
-  payload: { description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit }
+  payload: { description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit; renegotiation?: boolean }
   created_at?: string
 }
 
@@ -452,6 +457,10 @@ export default function App() {
   const [imageScale, setImageScale] = useState(1)
   const [callTarget, setCallTarget] = useState<Chat | null>(null)
   const [callStatus, setCallStatus] = useState<'calling' | 'incoming' | 'connected' | 'microphone-error' | 'signal-error'>('calling')
+  const [callMicrophoneMuted, setCallMicrophoneMuted] = useState(false)
+  const [callSoundMuted, setCallSoundMuted] = useState(false)
+  const [callScreenSharing, setCallScreenSharing] = useState(false)
+  const [remoteScreenSharing, setRemoteScreenSharing] = useState(false)
   const callStreamRef = useRef<MediaStream | null>(null)
   const callPeerRef = useRef<RTCPeerConnection | null>(null)
   const callIdRef = useRef<string | null>(null)
@@ -461,6 +470,16 @@ export default function App() {
   const chatsRef = useRef<Chat[]>([])
   const callSignalHandlerRef = useRef<(signal: CallSignal) => void>(() => undefined)
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const remoteScreenVideoRef = useRef<HTMLVideoElement | null>(null)
+  const callRingtoneAudioRef = useRef<HTMLAudioElement | null>(null)
+  const callMicrophoneMuteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const callMicrophoneUnmuteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const callSoundMuteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const callSoundUnmuteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const callMicrophoneMutedRef = useRef(false)
+  const callSoundMutedRef = useRef(false)
+  const screenShareStreamRef = useRef<MediaStream | null>(null)
+  const screenShareSenderRef = useRef<RTCRtpSender | null>(null)
   const photoInputRef = useRef<HTMLInputElement>(null)
   const voiceRecorderRef = useRef<MediaRecorder | null>(null)
   const voiceStreamRef = useRef<MediaStream | null>(null)
@@ -965,6 +984,7 @@ export default function App() {
       setSelectedProfile(null)
       setMessages([])
       setPinnedMessage(null)
+      setReplyingTo(null)
       setActiveNav('Чаты')
       return
     }
@@ -973,6 +993,7 @@ export default function App() {
     setActiveNav('Чаты')
     setMessages([])
     setPinnedMessage(null)
+    setReplyingTo(null)
     setChatError('')
     await loadMessages(chat.conversation_id)
   }
@@ -1296,12 +1317,10 @@ export default function App() {
 
   async function copyMessage(message: Message) {
     const text = message.image_path ? 'Фото' : message.audio_path ? 'Голосовое сообщение' : message.body
+    setChatError('')
     try {
       await navigator.clipboard.writeText(text)
-      setChatError('Сообщение скопировано.')
-    } catch {
-      setChatError('Не удалось скопировать сообщение.')
-    }
+    } catch {}
     setMessageMenu(null)
   }
 
@@ -1403,7 +1422,8 @@ export default function App() {
       return
     }
     if (selectedConversation === favoritesConversationId) {
-      const message: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body, created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: null, image_name: null, audio_path: null, audio_name: null, audio_duration: null }
+      const reply = replyingTo
+      const message: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body, created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: null, image_name: null, audio_path: null, audio_name: null, audio_duration: null, reply_to_id: reply?.id ?? null, reply_body: reply ? reply.image_path ? 'Фотография' : reply.audio_path ? 'Голосовое сообщение' : reply.body : null, reply_sender_id: reply?.sender_id ?? null }
       scrollToLatestMessageRef.current = true
       setMessages((current) => {
         const next = [...current, message]
@@ -1411,6 +1431,7 @@ export default function App() {
         return next
       })
       setDraft('')
+      setReplyingTo(null)
       window.requestAnimationFrame(() => composerInputRef.current?.focus())
       return
     }
@@ -1978,17 +1999,139 @@ export default function App() {
     if (error) throw error
   }
 
+  function playCallFeedback(audio: HTMLAudioElement | null) {
+    if (!audio) return
+    audio.pause()
+    audio.currentTime = 0
+    void audio.play().catch(() => undefined)
+  }
+
+  function startIncomingRingtone() {
+    const ringtone = callRingtoneAudioRef.current
+    if (!ringtone) return
+    ringtone.currentTime = 0
+    void ringtone.play().catch(() => undefined)
+  }
+
+  function stopIncomingRingtone() {
+    const ringtone = callRingtoneAudioRef.current
+    if (!ringtone) return
+    ringtone.pause()
+    ringtone.currentTime = 0
+  }
+
   function releaseCallResources() {
+    stopIncomingRingtone()
     const callId = callIdRef.current
     callPeerRef.current?.close()
     callPeerRef.current = null
     callStreamRef.current?.getTracks().forEach((track) => track.stop())
     callStreamRef.current = null
-    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null
+    screenShareStreamRef.current?.getTracks().forEach((track) => {
+      track.onended = null
+      track.stop()
+    })
+    screenShareStreamRef.current = null
+    screenShareSenderRef.current = null
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null
+      remoteAudioRef.current.muted = false
+    }
+    if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = null
     if (callId) delete pendingCallIceCandidatesRef.current[callId]
     callIdRef.current = null
     queuedIceCandidatesRef.current = []
     incomingOfferRef.current = null
+    callMicrophoneMutedRef.current = false
+    callSoundMutedRef.current = false
+    setCallMicrophoneMuted(false)
+    setCallSoundMuted(false)
+    setCallScreenSharing(false)
+    setRemoteScreenSharing(false)
+  }
+
+  function toggleCallMicrophone() {
+    const nextMuted = !callMicrophoneMutedRef.current
+    callMicrophoneMutedRef.current = nextMuted
+    callStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !nextMuted
+    })
+    setCallMicrophoneMuted(nextMuted)
+    playCallFeedback(nextMuted ? callMicrophoneMuteAudioRef.current : callMicrophoneUnmuteAudioRef.current)
+  }
+
+  function toggleCallSound() {
+    const nextMuted = !callSoundMutedRef.current
+    callSoundMutedRef.current = nextMuted
+    if (remoteAudioRef.current) remoteAudioRef.current.muted = nextMuted
+    setCallSoundMuted(nextMuted)
+    playCallFeedback(nextMuted ? callSoundMuteAudioRef.current : callSoundUnmuteAudioRef.current)
+  }
+
+  async function renegotiateCall(peer: RTCPeerConnection, target: Chat, callId: string) {
+    const offer = await peer.createOffer()
+    await peer.setLocalDescription(offer)
+    await sendCallSignal(target, callId, 'offer', { description: offer, renegotiation: true })
+  }
+
+  async function stopScreenShare() {
+    const sender = screenShareSenderRef.current
+    const stream = screenShareStreamRef.current
+    if (!sender && !stream) return
+
+    screenShareSenderRef.current = null
+    screenShareStreamRef.current = null
+    stream?.getTracks().forEach((track) => {
+      track.onended = null
+      track.stop()
+    })
+    setCallScreenSharing(false)
+
+    const peer = callPeerRef.current
+    const target = callTarget
+    const callId = callIdRef.current
+    if (!sender || !peer || !target || !callId) return
+    try {
+      peer.removeTrack(sender)
+      await renegotiateCall(peer, target, callId)
+    } catch {}
+  }
+
+  async function startScreenShare() {
+    const peer = callPeerRef.current
+    const target = callTarget
+    const callId = callIdRef.current
+    if (!peer || !target || !callId || peer.connectionState !== 'connected' || peer.signalingState !== 'stable' || !navigator.mediaDevices?.getDisplayMedia) return
+
+    let stream: MediaStream | null = null
+    let sender: RTCRtpSender | null = null
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { max: 30 } }, audio: false })
+      if (callPeerRef.current !== peer) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+      const track = stream.getVideoTracks()[0]
+      if (!track) {
+        stream.getTracks().forEach((item) => item.stop())
+        return
+      }
+      sender = peer.addTrack(track, stream)
+      screenShareStreamRef.current = stream
+      screenShareSenderRef.current = sender
+      setCallScreenSharing(true)
+      track.onended = () => { void stopScreenShare() }
+      await renegotiateCall(peer, target, callId)
+    } catch {
+      if (sender && peer.getSenders().includes(sender)) peer.removeTrack(sender)
+      stream?.getTracks().forEach((track) => {
+        track.onended = null
+        track.stop()
+      })
+      screenShareStreamRef.current = null
+      screenShareSenderRef.current = null
+      setCallScreenSharing(false)
+    }
   }
 
   function createCallPeer(target: Chat, callId: string) {
@@ -1997,7 +2140,17 @@ export default function App() {
       if (event.candidate) void sendCallSignal(target, callId, 'ice', { candidate: event.candidate.toJSON() }).catch(() => setCallStatus('signal-error'))
     }
     peer.ontrack = (event) => {
-      if (remoteAudioRef.current) remoteAudioRef.current.srcObject = event.streams[0]
+      if (event.track.kind === 'video') {
+        if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = event.streams[0] || new MediaStream([event.track])
+        setRemoteScreenSharing(true)
+        event.track.onended = () => {
+          if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = null
+          setRemoteScreenSharing(false)
+        }
+      } else if (remoteAudioRef.current) {
+        remoteAudioRef.current.muted = callSoundMutedRef.current
+        remoteAudioRef.current.srcObject = event.streams[0]
+      }
       setCallStatus('connected')
     }
     peer.onconnectionstatechange = () => {
@@ -2019,6 +2172,20 @@ export default function App() {
 
   async function handleCallSignal(signal: CallSignal) {
     if (signal.kind === 'offer') {
+      const activePeer = callPeerRef.current
+      const activeTarget = callTarget
+      if (signal.payload.renegotiation && activePeer && activeTarget && signal.sender_id === activeTarget.id && signal.call_id === callIdRef.current && signal.payload.description) {
+        try {
+          await activePeer.setRemoteDescription(signal.payload.description)
+          const answer = await activePeer.createAnswer()
+          await activePeer.setLocalDescription(answer)
+          await sendCallSignal(activeTarget, signal.call_id, 'answer', { description: answer, renegotiation: true })
+          for (const candidate of queuedIceCandidatesRef.current.splice(0)) await activePeer.addIceCandidate(candidate)
+        } catch {
+          setCallStatus('signal-error')
+        }
+        return
+      }
       if (incomingOfferRef.current?.call_id === signal.call_id) return
       if (callPeerRef.current || incomingOfferRef.current) {
         const target = await resolveCallTarget(signal)
@@ -2030,6 +2197,7 @@ export default function App() {
       incomingOfferRef.current = signal
       setCallTarget(target)
       setCallStatus('incoming')
+      startIncomingRingtone()
       return
     }
     if (signal.kind === 'ice' && signal.payload.candidate) {
@@ -2069,6 +2237,10 @@ export default function App() {
 
   async function startCall() {
     if (!selectedChat || selectedConversation === favoritesConversationId || selectedChat.is_blocked) return
+    callMicrophoneMutedRef.current = false
+    callSoundMutedRef.current = false
+    setCallMicrophoneMuted(false)
+    setCallSoundMuted(false)
     setCallTarget(selectedChat)
     setCallStatus('calling')
     let stream: MediaStream
@@ -2082,7 +2254,10 @@ export default function App() {
       callStreamRef.current = stream
       const callId = crypto.randomUUID()
       const peer = createCallPeer(selectedChat, callId)
-      stream.getTracks().forEach((track) => peer.addTrack(track, stream))
+      stream.getTracks().forEach((track) => {
+        track.enabled = !callMicrophoneMutedRef.current
+        peer.addTrack(track, stream)
+      })
       const offer = await peer.createOffer()
       await peer.setLocalDescription(offer)
       await sendCallSignal(selectedChat, callId, 'offer', { description: offer })
@@ -2097,6 +2272,11 @@ export default function App() {
     const signal = incomingOfferRef.current
     const target = callTarget
     if (!signal || !target) return
+    stopIncomingRingtone()
+    callMicrophoneMutedRef.current = false
+    callSoundMutedRef.current = false
+    setCallMicrophoneMuted(false)
+    setCallSoundMuted(false)
     setCallStatus('calling')
     let stream: MediaStream
     try {
@@ -2108,7 +2288,10 @@ export default function App() {
     try {
       callStreamRef.current = stream
       const peer = createCallPeer(target, signal.call_id)
-      stream.getTracks().forEach((track) => peer.addTrack(track, stream))
+      stream.getTracks().forEach((track) => {
+        track.enabled = !callMicrophoneMutedRef.current
+        peer.addTrack(track, stream)
+      })
       await peer.setRemoteDescription(signal.payload.description as RTCSessionDescriptionInit)
       const answer = await peer.createAnswer()
       await peer.setLocalDescription(answer)
@@ -2159,7 +2342,7 @@ export default function App() {
         .limit(30)
       if (cancelled || !data?.length) return
       const endedCalls = new Set((data as CallSignal[]).filter((signal) => signal.kind === 'hangup' || signal.kind === 'decline').map((signal) => signal.call_id))
-      const offer = (data as CallSignal[]).find((signal) => signal.kind === 'offer' && !endedCalls.has(signal.call_id))
+      const offer = (data as CallSignal[]).find((signal) => signal.kind === 'offer' && !signal.payload.renegotiation && !endedCalls.has(signal.call_id))
       if (offer) callSignalHandlerRef.current(offer)
     }
     void restoreIncomingCall()
@@ -2285,6 +2468,11 @@ export default function App() {
 
   return <main className={`app-shell ${mobileSettingsOpen ? 'mobile-settings-open' : ''} ${activeNav === 'Настройки' ? 'settings-active' : ''}`}>
     <audio ref={notificationAudioRef} src="/message-notification.mp3" preload="auto" />
+    <audio ref={callRingtoneAudioRef} src="/call-ringtone.mp3" preload="auto" loop />
+    <audio ref={callMicrophoneMuteAudioRef} src="/call-microphone-mute.mp3" preload="auto" />
+    <audio ref={callMicrophoneUnmuteAudioRef} src="/call-microphone-unmute.mp3" preload="auto" />
+    <audio ref={callSoundMuteAudioRef} src="/call-sound-mute.mp3" preload="auto" />
+    <audio ref={callSoundUnmuteAudioRef} src="/call-sound-unmute.mp3" preload="auto" />
     {appBooting && <div className="app-loader" role="status" aria-label="Загрузка Osirium"><div className="app-loader-mark" /><p>OSIRIUM</p><span>Загружаем пространство</span><i /></div>}
     <aside className="sidebar">
       <div className="sidebar-head"><h1>{activeNav === 'Чаты' ? 'Сообщения' : activeNav}</h1>{activeNav !== 'Настройки' && <button className="icon-button" aria-label="Новый диалог" onClick={() => { setActiveNav('Чаты'); setSearch('') }}><PlusIcon /></button>}</div>
@@ -2358,14 +2546,63 @@ export default function App() {
       {selectedChat.blocked_by_other && <div className="system-message"><strong>Ось-Бот</strong><span>Ваши последующие сообщения не будут видны собеседнику, увы он вас заблокировал ;&lt;&lt;</span></div>}
       {pinnedMessage && <button type="button" className="pinned-message" onClick={() => openMessageMenu(pinnedMessage, window.innerWidth / 2, 110)}><strong>Закреплённое сообщение</strong><span>{pinnedMessage.image_path ? 'Фотография' : pinnedMessage.body}</span></button>}
       {selectedConversation === favoritesConversationId && <label className="favorites-search"><SearchIcon /><input value={favoritesSearch} onChange={(event) => setFavoritesSearch(event.target.value)} placeholder="Поиск в Избранном" /></label>}<div className="messages">{displayedMessages.map((message, index) => <div key={message.id}>{(index === 0 || messageDayKey(displayedMessages[index - 1].created_at) !== messageDayKey(message.created_at)) && <div className="date-label">{messageDateLabel(message.created_at)}</div>}<div className={`bubble-wrap ${message.sender_id === currentUserId ? 'mine' : ''}`} data-message-id={message.id} onContextMenu={(event) => { event.preventDefault(); openMessageMenu(message, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startMessageHold(message, touch.clientX, touch.clientY) }} onTouchMove={clearMessageHold} onTouchEnd={clearMessageHold} onTouchCancel={clearMessageHold}><div className="bubble">{message.forwarded_from_id && <small className="message-forwarded">Пересланное сообщение</small>}{message.reply_to_id && <span className="message-reply">{message.reply_sender_id === currentUserId ? 'Вы' : 'Ответ'} · {message.reply_body || 'Сообщение недоступно'}</span>}{message.image_path && (messageImageUrls[message.id] ? <button type="button" className="message-image-button" aria-label="Открыть фотографию" onClick={() => { resetImageZoom(); setOpenedImage({ src: messageImageUrls[message.id], name: message.image_name || 'Фотография' }) }}><img className={`message-image ${loadedMessageImages[message.id] ? 'is-loaded' : ''}`} src={messageImageUrls[message.id]} alt={message.image_name || 'Фотография'} onLoad={() => setLoadedMessageImages((current) => ({ ...current, [message.id]: true }))} /></button> : <span className="image-loading">Загрузка фото…</span>)}{message.audio_path && (messageImageUrls[message.id] ? <div className="voice-message"><span>Голосовое · {message.audio_duration || 0} сек.</span><audio controls preload="metadata" src={messageImageUrls[message.id]} /></div> : <span className="image-loading">Загрузка голосового…</span>)}{!message.image_path && !message.audio_path && message.body}<time>{formatTime(message.created_at)}{message.edited_at && <span> · изм.</span>}{message.sender_id === currentUserId && message.read_at && <span className="read-receipt" aria-label="Прочитано"><CheckIcon /></span>}</time></div></div></div>)}{chatError && <p className="chat-error">{chatError}</p>}</div>
-        {voiceLocked && <div className="voice-record-menu"><strong>{voicePaused ? 'На паузе' : 'Запись голосового'} · {voiceSeconds} сек.</strong><button type="button" onClick={toggleVoicePause}>{voicePaused ? 'Продолжить' : 'Пауза'}</button><button type="button" onClick={() => finishVoiceRecording(true)}>Отправить</button><button type="button" className="voice-delete" onClick={() => finishVoiceRecording(false)}>Удалить</button></div>}<form onSubmit={sendMessage} className="composer"><input ref={photoInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={handlePhotoSelection} /><button type="button" className="composer-action" aria-label="Прикрепить фото" onClick={() => photoInputRef.current?.click()} disabled={photoUploading}><CameraIcon /></button><input ref={composerInputRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Написать сообщение" disabled={sending || voiceRecording} /><button type="button" className={`composer-action voice-button ${voiceRecording ? 'is-recording' : ''}`} aria-label="Записать голосовое" onPointerDown={onVoicePointerDown} onPointerUp={onVoicePointerUp} onPointerCancel={() => { if (voiceHoldActiveRef.current) finishVoiceRecording(false) }} disabled={photoUploading}><MicrophoneIcon /></button><button className="send" aria-label="Отправить" disabled={sending || voiceRecording}><ArrowRightIcon /></button></form>
+        {voiceLocked && <div className="voice-record-menu">
+          <strong>{voicePaused ? 'На паузе' : 'Запись голосового'} · {voiceSeconds} сек.</strong>
+          <button type="button" onClick={toggleVoicePause}>{voicePaused ? 'Продолжить' : 'Пауза'}</button>
+          <button type="button" onClick={() => finishVoiceRecording(true)}>Отправить</button>
+          <button type="button" className="voice-delete" onClick={() => finishVoiceRecording(false)}>Удалить</button>
+        </div>}
+        {replyingTo && <div className="reply-composer-preview" role="status">
+          <div>
+            <strong>{replyingTo.sender_id === currentUserId ? 'Вы' : displayNameFor(selectedChat)}</strong>
+            <span>{replyingTo.image_path ? 'Фотография' : replyingTo.audio_path ? 'Голосовое сообщение' : replyingTo.body || 'Сообщение'}</span>
+          </div>
+          <button type="button" aria-label="Отменить ответ" onClick={() => setReplyingTo(null)}><CloseCircleIcon /></button>
+        </div>}
+        <form onSubmit={sendMessage} className="composer">
+          <input ref={photoInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={handlePhotoSelection} />
+          <button type="button" className="composer-action" aria-label="Прикрепить фото" onClick={() => photoInputRef.current?.click()} disabled={photoUploading}><CameraIcon /></button>
+          <input ref={composerInputRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Написать сообщение" disabled={sending || voiceRecording} />
+          <button type="button" className={`composer-action voice-button ${voiceRecording ? 'is-recording' : ''}`} aria-label="Записать голосовое" onPointerDown={onVoicePointerDown} onPointerUp={onVoicePointerUp} onPointerCancel={() => { if (voiceHoldActiveRef.current) finishVoiceRecording(false) }} disabled={photoUploading}><MicrophoneIcon /></button>
+          <button className="send" aria-label="Отправить" disabled={sending || voiceRecording}><ArrowRightIcon /></button>
+        </form>
       </> : <div className="page-view"><p className="eyebrow">ЛИЧНЫЕ СООБЩЕНИЯ</p><h2>Найдите человека по логину.</h2><p>Введите в поиске слева минимум 3 символа из его @логина — после этого можно начать настоящий диалог.</p></div>)}
       {!selectedProfile && activeNav === 'Главная' && <div className="page-view"><p className="eyebrow">OSIRIUM</p><h2>Ваши сообщения.</h2><p>У вас {chats.length} {chats.length === 1 ? 'диалог' : 'диалогов'}. Используйте поиск, чтобы написать новому человеку.</p><button className="page-action" onClick={() => setActiveNav('Чаты')}>Открыть чаты <ArrowRightIcon /></button></div>}
       {!selectedProfile && activeNav === 'Контакты' && <div className="page-view contacts-view"><p className="eyebrow">ПОИСК ЛЮДЕЙ</p><h2>Контакты по логину</h2><p>Поиск находится слева. Логин доступен в формате @username; в результатах отображаются только подходящие пользователи.</p></div>}
       {!selectedProfile && activeNav === 'Настройки' && <div className="page-view settings-view"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">НАСТРОЙКИ</p>{settingsSection === 'Профиль' && <><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><p className="settings-description">Username <b>@{currentUsername}</b> используется для поиска и остаётся отдельным от display-ника.</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()} aria-label="Изменить аватар">{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'JPG, PNG или WebP до 5 МБ'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} placeholder="Как вас будут видеть" /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} placeholder="Расскажите о себе" /><small>{profileBio.length}/160</small></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Это отдельный код только для этого браузера. Он не меняет пароль аккаунта и не покидает устройство.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder={appLockHash ? 'Оставьте пустым, чтобы не менять' : '6 цифр'} /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}{settingsSection === 'Опасная зона' && <section className="danger-zone"><h2>Опасная зона</h2><p>Здесь меняется основной пароль аккаунта — он используется при входе в Osirium.</p><form className="privacy-form" onSubmit={changeAccountPassword}><label>Новый пароль аккаунта<input type="password" value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} autoComplete="new-password" placeholder="Минимум 8 символов" /></label><label>Повторите пароль<input type="password" value={newAccountPasswordRepeat} onChange={(event) => setNewAccountPasswordRepeat(event.target.value)} autoComplete="new-password" placeholder="Повторите пароль" /></label><button className="privacy-save" disabled={accountPasswordSaving}>{accountPasswordSaving ? 'Меняем…' : 'Сменить пароль'}</button>{accountPasswordError && <p className="privacy-error">{accountPasswordError}</p>}</form><button className="logout" onClick={() => { void logout() }}>Выйти из аккаунта</button></section>}</div>}
     </section>
 
-    <audio ref={remoteAudioRef} autoPlay />{callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок"><div className="call-card"><span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}</span><h2>{callTarget.display_name || `@${callTarget.username}`}</h2><p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : callStatus === 'signal-error' ? 'Не удалось доставить звонок. Попробуйте ещё раз.' : 'Не удалось получить доступ к микрофону'}</p>{(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}{callStatus === 'incoming' && <div className="call-actions"><button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button><button type="button" className="call-hangup" onClick={declineCall}>Отклонить</button></div>}{callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => endCall()}>Завершить звонок</button>}</div></div>}
+    <audio ref={remoteAudioRef} autoPlay />
+    {callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок">
+      <div className="call-card">
+        <span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>
+          {profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}
+        </span>
+        <h2>{callTarget.display_name || `@${callTarget.username}`}</h2>
+        <p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : callStatus === 'signal-error' ? 'Не удалось доставить звонок. Попробуйте ещё раз.' : 'Не удалось получить доступ к микрофону'}</p>
+        {(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}
+        <div className={`remote-screen-preview ${remoteScreenSharing ? 'is-active' : ''}`}>
+          <video ref={remoteScreenVideoRef} autoPlay playsInline />
+        </div>
+        {callStatus === 'incoming' && <div className="call-actions">
+          <button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button>
+          <button type="button" className="call-hangup" onClick={declineCall}>Отклонить</button>
+        </div>}
+        {(callStatus === 'calling' || callStatus === 'connected') && <div className="call-controls">
+          <button type="button" className={`call-control ${callMicrophoneMuted ? 'is-muted' : ''}`} aria-label={callMicrophoneMuted ? 'Включить микрофон' : 'Выключить микрофон'} aria-pressed={callMicrophoneMuted} onClick={toggleCallMicrophone}>
+            {callMicrophoneMuted ? <MicrophoneSlashIcon /> : <MicrophoneIcon />}
+          </button>
+          <button type="button" className={`call-control ${callSoundMuted ? 'is-muted' : ''}`} aria-label={callSoundMuted ? 'Включить звук собеседника' : 'Выключить звук собеседника'} aria-pressed={callSoundMuted} onClick={toggleCallSound}>
+            {callSoundMuted ? <VolumeXIcon /> : <VolumeHighIcon />}
+          </button>
+          <button type="button" className={`call-control call-screen-share ${callScreenSharing ? 'is-active' : ''}`} aria-label={callScreenSharing ? 'Остановить демонстрацию экрана' : 'Включить демонстрацию экрана'} aria-pressed={callScreenSharing} disabled={callStatus !== 'connected'} onClick={() => { void (callScreenSharing ? stopScreenShare() : startScreenShare()) }}>
+            <MonitorIcon />
+          </button>
+        </div>}
+        {callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => endCall()}>Завершить звонок</button>}
+        {callStatus !== 'incoming' && <small className="call-screen-share-note">В данный момент демонстрация экрана доступна только для ПК, телефоны не позволяют сделать демонстрацию экрана вне приложения.</small>}
+      </div>
+    </div>}
 
     {chatMenu && <div className="message-menu-layer" onClick={() => setChatMenu(null)}><div className="message-menu chat-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(event) => event.stopPropagation()}>{chatMenu.mode === 'actions' ? <><button onClick={() => { void toggleChatPin(chatMenu.chat) }}>{chatMenu.chat.is_pinned ? 'Открепить чат' : 'Закрепить чат'}</button><button onClick={() => { void toggleChatMute(chatMenu.chat) }}>{chatMenu.chat.is_muted ? 'Включить звук' : 'Без звука'}</button>{chatMenu.chat.is_blocked ? <button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false, false) }}>Разблокировать</button> : <button className="message-menu-danger" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'block' } : null)}>Заблокировать</button>}</> : <><p>Заблокировать пользователя</p><button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false) }}>Заблокировать</button><button onClick={() => { void setChatBlock(chatMenu.chat, true) }}>Заблокировать скрытно</button><button className="message-menu-back" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
     {messageMenu && <div className="message-menu-layer" onClick={() => setMessageMenu(null)}>
