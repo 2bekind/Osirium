@@ -476,6 +476,7 @@ export default function App() {
   const callMicrophoneUnmuteAudioRef = useRef<HTMLAudioElement | null>(null)
   const callSoundMuteAudioRef = useRef<HTMLAudioElement | null>(null)
   const callSoundUnmuteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const ringtoneAwaitingGestureRef = useRef(false)
   const callMicrophoneMutedRef = useRef(false)
   const callSoundMutedRef = useRef(false)
   const screenShareStreamRef = useRef<MediaStream | null>(null)
@@ -928,7 +929,7 @@ export default function App() {
     setSearchLoading(true)
     const timeout = window.setTimeout(async () => {
       const { data, error } = await client.rpc('search_users', { search_text: query })
-      if (!error) setSearchResults((data ?? []) as Profile[])
+      if (!error) setSearchResults(((data ?? []) as Profile[]).filter((profile) => profile.username.toLowerCase() === query))
       else setChatError('Не удалось выполнить поиск пользователей.')
       setSearchLoading(false)
     }, 260)
@@ -1115,8 +1116,9 @@ export default function App() {
       setAdminError('Не удалось найти пользователя.')
       return
     }
-    setAdminResults((data ?? []) as Profile[])
-    if (!data?.length) setAdminError('Пользователь не найден.')
+    const exactMatches = ((data ?? []) as Profile[]).filter((profile) => profile.username.toLowerCase() === query)
+    setAdminResults(exactMatches)
+    if (!exactMatches.length) setAdminError('Пользователь не найден.')
   }
 
   async function assignBadge(profile: Profile, badge: 'helper' | 'idea' | null) {
@@ -2003,14 +2005,21 @@ export default function App() {
     if (!audio) return
     audio.pause()
     audio.currentTime = 0
+    audio.volume = 0.28
     void audio.play().catch(() => undefined)
   }
 
   function startIncomingRingtone() {
     const ringtone = callRingtoneAudioRef.current
     if (!ringtone) return
+    if (!ringtone.paused) return
     ringtone.currentTime = 0
-    void ringtone.play().catch(() => undefined)
+    ringtone.volume = 0.7
+    void ringtone.play().then(() => {
+      ringtoneAwaitingGestureRef.current = false
+    }).catch(() => {
+      ringtoneAwaitingGestureRef.current = true
+    })
   }
 
   function stopIncomingRingtone() {
@@ -2018,6 +2027,7 @@ export default function App() {
     if (!ringtone) return
     ringtone.pause()
     ringtone.currentTime = 0
+    ringtoneAwaitingGestureRef.current = false
   }
 
   function releaseCallResources() {
@@ -2148,8 +2158,11 @@ export default function App() {
           setRemoteScreenSharing(false)
         }
       } else if (remoteAudioRef.current) {
+        const stream = event.streams[0] || new MediaStream([event.track])
         remoteAudioRef.current.muted = callSoundMutedRef.current
-        remoteAudioRef.current.srcObject = event.streams[0]
+        remoteAudioRef.current.volume = 1
+        remoteAudioRef.current.srcObject = stream
+        void remoteAudioRef.current.play().catch(() => undefined)
       }
       setCallStatus('connected')
     }
@@ -2318,6 +2331,25 @@ export default function App() {
   }
 
   callSignalHandlerRef.current = (signal) => { void handleCallSignal(signal) }
+
+  useEffect(() => {
+    const retryIncomingRingtone = () => {
+      if (callStatus === 'incoming' && ringtoneAwaitingGestureRef.current) startIncomingRingtone()
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') retryIncomingRingtone()
+    }
+    window.addEventListener('focus', retryIncomingRingtone)
+    window.addEventListener('pointerdown', retryIncomingRingtone)
+    window.addEventListener('keydown', retryIncomingRingtone)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      window.removeEventListener('focus', retryIncomingRingtone)
+      window.removeEventListener('pointerdown', retryIncomingRingtone)
+      window.removeEventListener('keydown', retryIncomingRingtone)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [callStatus])
 
   useEffect(() => {
     if (!supabase || !currentUserId) return
@@ -2572,7 +2604,7 @@ export default function App() {
       {!selectedProfile && activeNav === 'Настройки' && <div className="page-view settings-view"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">НАСТРОЙКИ</p>{settingsSection === 'Профиль' && <><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><p className="settings-description">Username <b>@{currentUsername}</b> используется для поиска и остаётся отдельным от display-ника.</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()} aria-label="Изменить аватар">{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'JPG, PNG или WebP до 5 МБ'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} placeholder="Как вас будут видеть" /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} placeholder="Расскажите о себе" /><small>{profileBio.length}/160</small></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Это отдельный код только для этого браузера. Он не меняет пароль аккаунта и не покидает устройство.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder={appLockHash ? 'Оставьте пустым, чтобы не менять' : '6 цифр'} /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}{settingsSection === 'Опасная зона' && <section className="danger-zone"><h2>Опасная зона</h2><p>Здесь меняется основной пароль аккаунта — он используется при входе в Osirium.</p><form className="privacy-form" onSubmit={changeAccountPassword}><label>Новый пароль аккаунта<input type="password" value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} autoComplete="new-password" placeholder="Минимум 8 символов" /></label><label>Повторите пароль<input type="password" value={newAccountPasswordRepeat} onChange={(event) => setNewAccountPasswordRepeat(event.target.value)} autoComplete="new-password" placeholder="Повторите пароль" /></label><button className="privacy-save" disabled={accountPasswordSaving}>{accountPasswordSaving ? 'Меняем…' : 'Сменить пароль'}</button>{accountPasswordError && <p className="privacy-error">{accountPasswordError}</p>}</form><button className="logout" onClick={() => { void logout() }}>Выйти из аккаунта</button></section>}</div>}
     </section>
 
-    <audio ref={remoteAudioRef} autoPlay />
+    <audio ref={remoteAudioRef} autoPlay playsInline />
     {callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок">
       <div className="call-card">
         <span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>
