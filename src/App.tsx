@@ -89,6 +89,7 @@ type CallSignal = {
   recipient_id: string
   kind: 'offer' | 'answer' | 'ice' | 'hangup' | 'decline'
   payload: { description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit }
+  created_at?: string
 }
 
 type MessageMenu = {
@@ -450,12 +451,15 @@ export default function App() {
   const [openedImage, setOpenedImage] = useState<{ src: string; name: string } | null>(null)
   const [imageScale, setImageScale] = useState(1)
   const [callTarget, setCallTarget] = useState<Chat | null>(null)
-  const [callStatus, setCallStatus] = useState<'calling' | 'incoming' | 'connected' | 'microphone-error'>('calling')
+  const [callStatus, setCallStatus] = useState<'calling' | 'incoming' | 'connected' | 'microphone-error' | 'signal-error'>('calling')
   const callStreamRef = useRef<MediaStream | null>(null)
   const callPeerRef = useRef<RTCPeerConnection | null>(null)
   const callIdRef = useRef<string | null>(null)
   const queuedIceCandidatesRef = useRef<RTCIceCandidateInit[]>([])
+  const pendingCallIceCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({})
   const incomingOfferRef = useRef<CallSignal | null>(null)
+  const chatsRef = useRef<Chat[]>([])
+  const callSignalHandlerRef = useRef<(signal: CallSignal) => void>(() => undefined)
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
   const photoInputRef = useRef<HTMLInputElement>(null)
   const voiceRecorderRef = useRef<MediaRecorder | null>(null)
@@ -472,6 +476,8 @@ export default function App() {
   const notificationAudioRef = useRef<HTMLAudioElement | null>(null)
   const imagePinchRef = useRef<{ distance: number; scale: number } | null>(null)
   const bootStartedAtRef = useRef(Date.now())
+
+  chatsRef.current = chats
 
   useEffect(() => {
     const fallback = window.setTimeout(() => setAppBooting(false), 8000)
@@ -587,6 +593,11 @@ export default function App() {
   function notifyRecipient(message: Message) {
     if (!supabase || selectedConversation === favoritesConversationId) return
     void supabase.functions.invoke('send-push', { body: { message_id: message.id } })
+  }
+
+  function notifyIncomingCall(callId: string) {
+    if (!supabase) return
+    void supabase.functions.invoke('send-push', { body: { call_id: callId } })
   }
 
   function notifyAnnouncementPublished(announcementId: string) {
@@ -1956,19 +1967,41 @@ export default function App() {
   }
 
   async function sendCallSignal(target: Chat, callId: string, kind: CallSignal['kind'], payload: CallSignal['payload'] = {}) {
-    if (!supabase || !currentUserId) return
-    await supabase.from('call_signals').insert({ call_id: callId, conversation_id: target.conversation_id, sender_id: currentUserId, recipient_id: target.id, kind, payload })
+    if (!supabase || !currentUserId) throw new Error('Call signaling is unavailable')
+    const { error } = await supabase.rpc('send_call_signal', {
+      p_call_id: callId,
+      p_conversation_id: target.conversation_id,
+      p_recipient_id: target.id,
+      p_kind: kind,
+      p_payload: payload,
+    })
+    if (error) throw error
+  }
+
+  function releaseCallResources() {
+    const callId = callIdRef.current
+    callPeerRef.current?.close()
+    callPeerRef.current = null
+    callStreamRef.current?.getTracks().forEach((track) => track.stop())
+    callStreamRef.current = null
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null
+    if (callId) delete pendingCallIceCandidatesRef.current[callId]
+    callIdRef.current = null
+    queuedIceCandidatesRef.current = []
+    incomingOfferRef.current = null
   }
 
   function createCallPeer(target: Chat, callId: string) {
     const peer = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
-    peer.onicecandidate = (event) => { if (event.candidate) void sendCallSignal(target, callId, 'ice', { candidate: event.candidate.toJSON() }) }
+    peer.onicecandidate = (event) => {
+      if (event.candidate) void sendCallSignal(target, callId, 'ice', { candidate: event.candidate.toJSON() }).catch(() => setCallStatus('signal-error'))
+    }
     peer.ontrack = (event) => {
       if (remoteAudioRef.current) remoteAudioRef.current.srcObject = event.streams[0]
       setCallStatus('connected')
     }
     peer.onconnectionstatechange = () => {
-      if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') endCall(false)
+      if (peer.connectionState === 'failed') endCall(false)
     }
     callPeerRef.current = peer
     callIdRef.current = callId
@@ -1976,7 +2009,7 @@ export default function App() {
   }
 
   async function resolveCallTarget(signal: CallSignal) {
-    const chat = chats.find((item) => item.id === signal.sender_id && item.conversation_id === signal.conversation_id)
+    const chat = chatsRef.current.find((item) => item.id === signal.sender_id && item.conversation_id === signal.conversation_id)
     if (chat) return chat
     if (!supabase) return null
     const { data } = await supabase.rpc('get_public_profile', { p_user_id: signal.sender_id })
@@ -1986,6 +2019,12 @@ export default function App() {
 
   async function handleCallSignal(signal: CallSignal) {
     if (signal.kind === 'offer') {
+      if (incomingOfferRef.current?.call_id === signal.call_id) return
+      if (callPeerRef.current || incomingOfferRef.current) {
+        const target = await resolveCallTarget(signal)
+        if (target) void sendCallSignal(target, signal.call_id, 'decline').catch(() => undefined)
+        return
+      }
       const target = await resolveCallTarget(signal)
       if (!target) return
       incomingOfferRef.current = signal
@@ -1993,25 +2032,53 @@ export default function App() {
       setCallStatus('incoming')
       return
     }
-    const peer = callPeerRef.current
-    if (!peer || signal.call_id !== callIdRef.current) return
-    if (signal.kind === 'answer' && signal.payload.description) {
-      await peer.setRemoteDescription(signal.payload.description)
-      for (const candidate of queuedIceCandidatesRef.current.splice(0)) await peer.addIceCandidate(candidate)
-    }
     if (signal.kind === 'ice' && signal.payload.candidate) {
-      if (peer.remoteDescription) await peer.addIceCandidate(signal.payload.candidate)
-      else queuedIceCandidatesRef.current.push(signal.payload.candidate)
+      const peer = callPeerRef.current
+      if (!peer || signal.call_id !== callIdRef.current) {
+        const candidates = pendingCallIceCandidatesRef.current[signal.call_id] || []
+        if (candidates.length < 32) candidates.push(signal.payload.candidate)
+        pendingCallIceCandidatesRef.current[signal.call_id] = candidates
+        return
+      }
+      try {
+        if (peer.remoteDescription) await peer.addIceCandidate(signal.payload.candidate)
+        else queuedIceCandidatesRef.current.push(signal.payload.candidate)
+      } catch {
+        setCallStatus('signal-error')
+      }
+      return
     }
-    if (signal.kind === 'hangup' || signal.kind === 'decline') endCall(false)
+    const peer = callPeerRef.current
+    if (!peer || signal.call_id !== callIdRef.current) {
+      if (signal.kind === 'hangup' || signal.kind === 'decline') {
+        delete pendingCallIceCandidatesRef.current[signal.call_id]
+        if (signal.call_id === incomingOfferRef.current?.call_id) endCall(false)
+      }
+      return
+    }
+    try {
+      if (signal.kind === 'answer' && signal.payload.description) {
+        await peer.setRemoteDescription(signal.payload.description)
+        for (const candidate of queuedIceCandidatesRef.current.splice(0)) await peer.addIceCandidate(candidate)
+      }
+      if (signal.kind === 'hangup' || signal.kind === 'decline') endCall(false)
+    } catch {
+      setCallStatus('signal-error')
+    }
   }
 
   async function startCall() {
     if (!selectedChat || selectedConversation === favoritesConversationId || selectedChat.is_blocked) return
     setCallTarget(selectedChat)
     setCallStatus('calling')
+    let stream: MediaStream
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch {
+      setCallStatus('microphone-error')
+      return
+    }
+    try {
       callStreamRef.current = stream
       const callId = crypto.randomUUID()
       const peer = createCallPeer(selectedChat, callId)
@@ -2019,8 +2086,10 @@ export default function App() {
       const offer = await peer.createOffer()
       await peer.setLocalDescription(offer)
       await sendCallSignal(selectedChat, callId, 'offer', { description: offer })
+      notifyIncomingCall(callId)
     } catch {
-      setCallStatus('microphone-error')
+      releaseCallResources()
+      setCallStatus('signal-error')
     }
   }
 
@@ -2029,8 +2098,14 @@ export default function App() {
     const target = callTarget
     if (!signal || !target) return
     setCallStatus('calling')
+    let stream: MediaStream
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch {
+      setCallStatus('microphone-error')
+      return
+    }
+    try {
       callStreamRef.current = stream
       const peer = createCallPeer(target, signal.call_id)
       stream.getTracks().forEach((track) => peer.addTrack(track, stream))
@@ -2038,36 +2113,63 @@ export default function App() {
       const answer = await peer.createAnswer()
       await peer.setLocalDescription(answer)
       await sendCallSignal(target, signal.call_id, 'answer', { description: answer })
-      for (const candidate of queuedIceCandidatesRef.current.splice(0)) await peer.addIceCandidate(candidate)
+      const pendingCandidates = pendingCallIceCandidatesRef.current[signal.call_id] || []
+      delete pendingCallIceCandidatesRef.current[signal.call_id]
+      for (const candidate of [...pendingCandidates, ...queuedIceCandidatesRef.current.splice(0)]) await peer.addIceCandidate(candidate)
     } catch {
-      setCallStatus('microphone-error')
+      releaseCallResources()
+      setCallStatus('signal-error')
     }
   }
 
   function endCall(notify = true) {
-    if (notify && callTarget && callIdRef.current) void sendCallSignal(callTarget, callIdRef.current, 'hangup')
-    callPeerRef.current?.close()
-    callPeerRef.current = null
-    callStreamRef.current?.getTracks().forEach((track) => track.stop())
-    callStreamRef.current = null
-    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null
-    callIdRef.current = null
-    queuedIceCandidatesRef.current = []
-    incomingOfferRef.current = null
+    const callId = callIdRef.current || incomingOfferRef.current?.call_id
+    if (notify && callTarget && callId) void sendCallSignal(callTarget, callId, 'hangup').catch(() => undefined)
+    releaseCallResources()
     setCallTarget(null)
   }
 
   function declineCall() {
-    if (callTarget && incomingOfferRef.current) void sendCallSignal(callTarget, incomingOfferRef.current.call_id, 'decline')
+    if (callTarget && incomingOfferRef.current) void sendCallSignal(callTarget, incomingOfferRef.current.call_id, 'decline').catch(() => undefined)
     endCall(false)
   }
+
+  callSignalHandlerRef.current = (signal) => { void handleCallSignal(signal) }
 
   useEffect(() => {
     if (!supabase || !currentUserId) return
     const client = supabase
-    const channel = client.channel(`call-signals-${currentUserId}`).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_signals', filter: `recipient_id=eq.${currentUserId}` }, (payload) => { void handleCallSignal(payload.new as CallSignal) }).subscribe()
+    const channel = client.channel(`call-signals-${currentUserId}`).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_signals', filter: `recipient_id=eq.${currentUserId}` }, (payload) => { callSignalHandlerRef.current(payload.new as CallSignal) }).subscribe()
     return () => { void client.removeChannel(channel) }
-  }, [currentUserId, chats])
+  }, [currentUserId])
+
+  useEffect(() => {
+    if (!supabase || !currentUserId) return
+    const client = supabase
+    let cancelled = false
+    const restoreIncomingCall = async () => {
+      if (cancelled || document.visibilityState !== 'visible' || callPeerRef.current || incomingOfferRef.current) return
+      const { data } = await client
+        .from('call_signals')
+        .select('call_id, conversation_id, sender_id, recipient_id, kind, payload, created_at')
+        .eq('recipient_id', currentUserId)
+        .in('kind', ['offer', 'hangup', 'decline'])
+        .gte('created_at', new Date(Date.now() - 90_000).toISOString())
+        .order('created_at', { ascending: false })
+        .limit(30)
+      if (cancelled || !data?.length) return
+      const endedCalls = new Set((data as CallSignal[]).filter((signal) => signal.kind === 'hangup' || signal.kind === 'decline').map((signal) => signal.call_id))
+      const offer = (data as CallSignal[]).find((signal) => signal.kind === 'offer' && !endedCalls.has(signal.call_id))
+      if (offer) callSignalHandlerRef.current(offer)
+    }
+    void restoreIncomingCall()
+    const onVisibilityChange = () => { if (document.visibilityState === 'visible') void restoreIncomingCall() }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      cancelled = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [currentUserId])
 
   function clampImageScale(value: number) {
     return Math.min(5, Math.max(1, value))
@@ -2263,7 +2365,7 @@ export default function App() {
       {!selectedProfile && activeNav === 'Настройки' && <div className="page-view settings-view"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">НАСТРОЙКИ</p>{settingsSection === 'Профиль' && <><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><p className="settings-description">Username <b>@{currentUsername}</b> используется для поиска и остаётся отдельным от display-ника.</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()} aria-label="Изменить аватар">{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'JPG, PNG или WebP до 5 МБ'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} placeholder="Как вас будут видеть" /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} placeholder="Расскажите о себе" /><small>{profileBio.length}/160</small></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Это отдельный код только для этого браузера. Он не меняет пароль аккаунта и не покидает устройство.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder={appLockHash ? 'Оставьте пустым, чтобы не менять' : '6 цифр'} /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}{settingsSection === 'Опасная зона' && <section className="danger-zone"><h2>Опасная зона</h2><p>Здесь меняется основной пароль аккаунта — он используется при входе в Osirium.</p><form className="privacy-form" onSubmit={changeAccountPassword}><label>Новый пароль аккаунта<input type="password" value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} autoComplete="new-password" placeholder="Минимум 8 символов" /></label><label>Повторите пароль<input type="password" value={newAccountPasswordRepeat} onChange={(event) => setNewAccountPasswordRepeat(event.target.value)} autoComplete="new-password" placeholder="Повторите пароль" /></label><button className="privacy-save" disabled={accountPasswordSaving}>{accountPasswordSaving ? 'Меняем…' : 'Сменить пароль'}</button>{accountPasswordError && <p className="privacy-error">{accountPasswordError}</p>}</form><button className="logout" onClick={() => { void logout() }}>Выйти из аккаунта</button></section>}</div>}
     </section>
 
-    <audio ref={remoteAudioRef} autoPlay />{callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок"><div className="call-card"><span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}</span><h2>{callTarget.display_name || `@${callTarget.username}`}</h2><p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : 'Не удалось получить доступ к микрофону'}</p>{(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}{callStatus === 'incoming' && <div className="call-actions"><button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button><button type="button" className="call-hangup" onClick={declineCall}>Отклонить</button></div>}{callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => endCall()}>Завершить звонок</button>}</div></div>}
+    <audio ref={remoteAudioRef} autoPlay />{callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок"><div className="call-card"><span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}</span><h2>{callTarget.display_name || `@${callTarget.username}`}</h2><p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : callStatus === 'signal-error' ? 'Не удалось доставить звонок. Попробуйте ещё раз.' : 'Не удалось получить доступ к микрофону'}</p>{(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}{callStatus === 'incoming' && <div className="call-actions"><button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button><button type="button" className="call-hangup" onClick={declineCall}>Отклонить</button></div>}{callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => endCall()}>Завершить звонок</button>}</div></div>}
 
     {chatMenu && <div className="message-menu-layer" onClick={() => setChatMenu(null)}><div className="message-menu chat-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(event) => event.stopPropagation()}>{chatMenu.mode === 'actions' ? <><button onClick={() => { void toggleChatPin(chatMenu.chat) }}>{chatMenu.chat.is_pinned ? 'Открепить чат' : 'Закрепить чат'}</button><button onClick={() => { void toggleChatMute(chatMenu.chat) }}>{chatMenu.chat.is_muted ? 'Включить звук' : 'Без звука'}</button>{chatMenu.chat.is_blocked ? <button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false, false) }}>Разблокировать</button> : <button className="message-menu-danger" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'block' } : null)}>Заблокировать</button>}</> : <><p>Заблокировать пользователя</p><button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false) }}>Заблокировать</button><button onClick={() => { void setChatBlock(chatMenu.chat, true) }}>Заблокировать скрытно</button><button className="message-menu-back" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
     {messageMenu && <div className="message-menu-layer" onClick={() => setMessageMenu(null)}>

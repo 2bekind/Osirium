@@ -6,10 +6,16 @@ self.addEventListener('push', (event) => {
     body: data.body || 'Новое сообщение',
     icon: '/osirium-icon.png',
     badge: '/osirium-icon.png',
+    tag: data.tag,
+    renotify: data.renotify === true,
     data: { url: data.url || '/' },
   }))
 })
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
-  event.waitUntil(self.clients.openWindow(event.notification.data?.url || '/'))
+  const url = event.notification.data?.url || '/'
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+    const existingClient = clients.find((client) => new URL(client.url).origin === self.location.origin)
+    return existingClient ? existingClient.focus() : self.clients.openWindow(url)
+  }))
 })

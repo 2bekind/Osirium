@@ -47,6 +47,41 @@ Deno.serve(async (request) => {
       }))
       return response({ delivered })
     }
+    if (typeof input.call_id === 'string') {
+      const callId = input.call_id as string
+      const { data: call } = await admin
+        .from('call_signals')
+        .select('call_id, conversation_id, recipient_id, created_at')
+        .eq('call_id', callId)
+        .eq('sender_id', user.id)
+        .eq('kind', 'offer')
+        .gte('created_at', new Date(Date.now() - 90_000).toISOString())
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (!call) return response({ error: 'Call not found' }, 404)
+      const { data: preference } = await admin
+        .from('direct_conversation_preferences')
+        .select('muted, blocked_at')
+        .eq('conversation_id', call.conversation_id)
+        .eq('user_id', call.recipient_id)
+        .maybeSingle()
+      if (preference?.muted || preference?.blocked_at) return response({ delivered: 0 })
+      const { data: caller } = await admin.from('profiles').select('display_name, username').eq('id', user.id).maybeSingle()
+      const { data: subscriptions } = await admin.from('push_subscriptions').select('endpoint, p256dh, auth').eq('user_id', call.recipient_id)
+      const callerName = caller?.display_name || caller?.username || 'Osirium'
+      const payload = JSON.stringify({ title: 'Osirium', body: `Вам звонит ${callerName}`, url: `/?call=${encodeURIComponent(callId)}`, tag: `call-${callId}`, renotify: true })
+      webpush.setVapidDetails('mailto:push@osirium.lol', vapidPublicKey, vapidPrivateKey)
+      let delivered = 0
+      await Promise.all((subscriptions ?? []).map(async (subscription) => {
+        try { await webpush.sendNotification({ endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } }, payload); delivered += 1 }
+        catch (error) {
+          const statusCode = typeof error === 'object' && error && 'statusCode' in error ? Number(error.statusCode) : 0
+          if (statusCode === 404 || statusCode === 410) await admin.from('push_subscriptions').delete().eq('endpoint', subscription.endpoint)
+        }
+      }))
+      return response({ delivered })
+    }
     if (typeof input.story_id === 'string') {
       const storyId = input.story_id as string
       const { data: story } = await admin.from('stories').select('id, user_id, overlay_text').eq('id', storyId).maybeSingle()
