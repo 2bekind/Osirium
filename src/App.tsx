@@ -2610,9 +2610,11 @@ export default function App() {
         <span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>
           {profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}
         </span>
-        <h2>{callTarget.display_name || `@${callTarget.username}`}</h2>
+        <div className="call-title">
+          <h2>{callTarget.display_name || `@${callTarget.username}`}</h2>
+          {(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}
+        </div>
         <p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : callStatus === 'signal-error' ? 'Не удалось доставить звонок. Попробуйте ещё раз.' : 'Не удалось получить доступ к микрофону'}</p>
-        {(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}
         <div className={`remote-screen-preview ${remoteScreenSharing ? 'is-active' : ''}`}>
           <video ref={remoteScreenVideoRef} autoPlay playsInline />
         </div>
