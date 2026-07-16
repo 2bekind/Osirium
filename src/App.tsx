@@ -2167,7 +2167,7 @@ export default function App() {
       setCallStatus('connected')
     }
     peer.onconnectionstatechange = () => {
-      if (peer.connectionState === 'failed') endCall(false)
+      if (peer.connectionState === 'failed') void endCall(false)
     }
     callPeerRef.current = peer
     callIdRef.current = callId
@@ -2233,7 +2233,7 @@ export default function App() {
     if (!peer || signal.call_id !== callIdRef.current) {
       if (signal.kind === 'hangup' || signal.kind === 'decline') {
         delete pendingCallIceCandidatesRef.current[signal.call_id]
-        if (signal.call_id === incomingOfferRef.current?.call_id) endCall(false)
+        if (signal.call_id === incomingOfferRef.current?.call_id) void endCall(false)
       }
       return
     }
@@ -2242,7 +2242,7 @@ export default function App() {
         await peer.setRemoteDescription(signal.payload.description)
         for (const candidate of queuedIceCandidatesRef.current.splice(0)) await peer.addIceCandidate(candidate)
       }
-      if (signal.kind === 'hangup' || signal.kind === 'decline') endCall(false)
+      if (signal.kind === 'hangup' || signal.kind === 'decline') void endCall(false)
     } catch {
       setCallStatus('signal-error')
     }
@@ -2318,16 +2318,24 @@ export default function App() {
     }
   }
 
-  function endCall(notify = true) {
+  async function endCall(notify = true) {
     const callId = callIdRef.current || incomingOfferRef.current?.call_id
-    if (notify && callTarget && callId) void sendCallSignal(callTarget, callId, 'hangup').catch(() => undefined)
+    if (notify && callTarget && callId) {
+      try {
+        await sendCallSignal(callTarget, callId, 'hangup')
+      } catch {}
+    }
     releaseCallResources()
     setCallTarget(null)
   }
 
-  function declineCall() {
-    if (callTarget && incomingOfferRef.current) void sendCallSignal(callTarget, incomingOfferRef.current.call_id, 'decline').catch(() => undefined)
-    endCall(false)
+  async function declineCall() {
+    if (callTarget && incomingOfferRef.current) {
+      try {
+        await sendCallSignal(callTarget, incomingOfferRef.current.call_id, 'decline')
+      } catch {}
+    }
+    await endCall(false)
   }
 
   callSignalHandlerRef.current = (signal) => { void handleCallSignal(signal) }
@@ -2367,14 +2375,15 @@ export default function App() {
       const { data } = await client
         .from('call_signals')
         .select('call_id, conversation_id, sender_id, recipient_id, kind, payload, created_at')
-        .eq('recipient_id', currentUserId)
+        .or(`recipient_id.eq.${currentUserId},sender_id.eq.${currentUserId}`)
         .in('kind', ['offer', 'hangup', 'decline'])
         .gte('created_at', new Date(Date.now() - 90_000).toISOString())
         .order('created_at', { ascending: false })
         .limit(30)
       if (cancelled || !data?.length) return
-      const endedCalls = new Set((data as CallSignal[]).filter((signal) => signal.kind === 'hangup' || signal.kind === 'decline').map((signal) => signal.call_id))
-      const offer = (data as CallSignal[]).find((signal) => signal.kind === 'offer' && !signal.payload.renegotiation && !endedCalls.has(signal.call_id))
+      const signals = data as CallSignal[]
+      const endedCalls = new Set(signals.filter((signal) => signal.kind === 'hangup' || signal.kind === 'decline').map((signal) => signal.call_id))
+      const offer = signals.find((signal) => signal.kind === 'offer' && signal.recipient_id === currentUserId && !signal.payload?.renegotiation && !endedCalls.has(signal.call_id))
       if (offer) callSignalHandlerRef.current(offer)
     }
     void restoreIncomingCall()
@@ -2620,7 +2629,7 @@ export default function App() {
         </div>
         {callStatus === 'incoming' && <div className="call-actions">
           <button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button>
-          <button type="button" className="call-hangup" onClick={declineCall}>Отклонить</button>
+          <button type="button" className="call-hangup" onClick={() => { void declineCall() }}>Отклонить</button>
         </div>}
         {(callStatus === 'calling' || callStatus === 'connected') && <div className="call-controls">
           <button type="button" className={`call-control ${callMicrophoneMuted ? 'is-muted' : ''}`} aria-label={callMicrophoneMuted ? 'Включить микрофон' : 'Выключить микрофон'} aria-pressed={callMicrophoneMuted} onClick={toggleCallMicrophone}>
@@ -2633,7 +2642,7 @@ export default function App() {
             <MonitorIcon />
           </button>
         </div>}
-        {callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => endCall()}>Завершить звонок</button>}
+        {callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => { void endCall() }}>Завершить звонок</button>}
         {callStatus !== 'incoming' && <small className="call-screen-share-note">В данный момент демонстрация экрана доступна только для ПК, телефоны не позволяют сделать демонстрацию экрана вне приложения.</small>}
       </div>
     </div>}
