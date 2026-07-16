@@ -337,7 +337,7 @@ export default function App() {
   const [currentDisplayName, setCurrentDisplayName] = useState('')
   const [profileBio, setProfileBio] = useState('')
   const [currentAvatarUrl, setCurrentAvatarUrl] = useState<string | null>(null)
-  const [settingsSection, setSettingsSection] = useState<'Профиль' | 'Оси' | 'Истории' | 'Уведомления' | 'Оформление' | 'Конфиденциальность' | 'Опасная зона' | 'Админ-панель'>('Профиль')
+  const [settingsSection, setSettingsSection] = useState<'Профиль' | 'Оси' | 'Истории' | 'Уведомления' | 'Оформление' | 'Конфиденциальность' | 'Локальный пароль' | 'Опасная зона' | 'Админ-панель'>('Профиль')
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false)
   const [adminSearch, setAdminSearch] = useState('')
   const [adminResults, setAdminResults] = useState<Profile[]>([])
@@ -360,6 +360,9 @@ export default function App() {
   const [lockError, setLockError] = useState('')
   const [newLockPassword, setNewLockPassword] = useState('')
   const [newLockPasswordRepeat, setNewLockPasswordRepeat] = useState('')
+  const [currentLockPassword, setCurrentLockPassword] = useState('')
+  const [localPasswordAccessGranted, setLocalPasswordAccessGranted] = useState(false)
+  const [localPasswordOrigin, setLocalPasswordOrigin] = useState<'Профиль' | 'Настройки'>('Настройки')
   const [privacyError, setPrivacyError] = useState('')
   const [privacySaving, setPrivacySaving] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('register')
@@ -439,6 +442,11 @@ export default function App() {
     ? messages.filter((message) => message.body.toLowerCase().includes(favoritesSearch.trim().toLowerCase()))
     : messages
   const navIndex = ['Чаты', 'Профиль', 'Настройки'].indexOf(activeNav)
+  function selectNavLabel(label: string) {
+    setSelectedProfile(null)
+    setActiveNav(label)
+    if (label === 'Настройки') setMobileSettingsOpen(false)
+  }
   const query = search.trim().toLowerCase()
   const isUserSearch = query.length >= 3
   const visibleChats = useMemo(
@@ -492,13 +500,7 @@ export default function App() {
     setChats((data ?? []).map((row: Record<string, unknown>) => ({ ...row, id: (row as { id?: string; other_user_id?: string }).id ?? (row as { other_user_id?: string }).other_user_id })) as ChatRow[])
   }, [])
 
-  async function requestNotificationPermission() {
-    if (!('Notification' in window)) {
-      setNotificationPermission('unsupported')
-      return
-    }
-    const permission = await Notification.requestPermission()
-    setNotificationPermission(permission)
+  const syncPushSubscription = useCallback(async (permission = notificationPermission) => {
     if (permission !== 'granted' || !supabase || !currentUserId || !('serviceWorker' in navigator) || !('PushManager' in window)) return
     const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY || 'BOlx31pxPjpvr4hw1alTWnv6aLO13qkvQme3AQIk6RpaOLLMdoqJul8A7NND7YRablzhOB9f1NOozbeZr5osCZA'
     try {
@@ -515,13 +517,21 @@ export default function App() {
     } catch {
       setChatError('Не удалось подключить это устройство к уведомлениям. Откройте Osirium с иконки на экране Домой и попробуйте ещё раз.')
     }
+  }, [currentUserId, notificationPermission])
+
+  async function requestNotificationPermission() {
+    if (!('Notification' in window)) {
+      setNotificationPermission('unsupported')
+      return
+    }
+    const permission = await Notification.requestPermission()
+    setNotificationPermission(permission)
+    if (permission === 'granted') void syncPushSubscription('granted')
   }
 
   useEffect(() => {
-    if (activeNav === 'Настройки' && settingsSection === 'Уведомления' && notificationPermission === 'granted') {
-      void requestNotificationPermission()
-    }
-  }, [activeNav, notificationPermission, settingsSection])
+    if (authenticated && notificationPermission === 'granted') void syncPushSubscription()
+  }, [authenticated, currentUserId, notificationPermission, syncPushSubscription])
 
   function notifyRecipient(message: Message) {
     if (!supabase || selectedConversation === favoritesConversationId) return
@@ -753,6 +763,13 @@ export default function App() {
   useEffect(() => {
     if (activeNav === 'Настройки' && ['Профиль', 'Оси', 'Конфиденциальность', 'Истории'].includes(settingsSection)) setSettingsSection('Уведомления')
   }, [activeNav])
+
+  useEffect(() => {
+    if (window.matchMedia('(max-width: 720px)').matches && activeNav === 'Настройки' && settingsSection === 'Конфиденциальность' && localPasswordOrigin === 'Профиль') {
+      setActiveNav('Профиль')
+      setLocalPasswordOrigin('Настройки')
+    }
+  }, [activeNav, localPasswordOrigin, settingsSection])
 
   useEffect(() => {
     if (!supabase || !authenticated || query.length < 3) {
@@ -1162,7 +1179,7 @@ export default function App() {
     setSending(false)
 
     if (error || !data?.[0]) {
-      setChatError('Не удалось отправить сообщение.')
+      setChatError(error?.message ? `Не удалось отправить сообщение: ${error.message}` : 'Не удалось отправить сообщение.')
       return
     }
 
@@ -1495,6 +1512,10 @@ export default function App() {
     event.preventDefault()
     if (!currentUserId) return
     setPrivacyError('')
+    if (appLockHash && appLockSalt && !localPasswordAccessGranted) {
+      setPrivacyError('Сначала введите текущий локальный пароль.')
+      return
+    }
     if (newLockPassword || newLockPasswordRepeat) {
       if (!/^\d{6}$/.test(newLockPassword)) {
         setPrivacyError('Код-пароль должен состоять из 6 цифр.')
@@ -1523,6 +1544,58 @@ export default function App() {
     setAppLockSalt(salt)
     setNewLockPassword('')
     setNewLockPasswordRepeat('')
+  }
+
+  async function verifyLocalPasswordForSettings(event: FormEvent) {
+    event.preventDefault()
+    if (!appLockHash || !appLockSalt) {
+      setLocalPasswordAccessGranted(true)
+      return
+    }
+    setPrivacyError('')
+    if (!/^\d{6}$/.test(currentLockPassword)) {
+      setPrivacyError('Введите 6 цифр текущего локального пароля.')
+      return
+    }
+    const hash = await hashLockPassword(currentLockPassword, appLockSalt)
+    if (hash !== appLockHash) {
+      setPrivacyError('Неверный локальный пароль.')
+      return
+    }
+    setCurrentLockPassword('')
+    setLocalPasswordAccessGranted(true)
+  }
+
+  function openLocalPasswordSettings() {
+    setLocalPasswordOrigin(activeNav === 'Профиль' ? 'Профиль' : 'Настройки')
+    setPrivacyError('')
+    setCurrentLockPassword('')
+    setNewLockPassword('')
+    setNewLockPasswordRepeat('')
+    setLocalPasswordAccessGranted(!appLockHash)
+    setActiveNav('Настройки')
+    setSettingsSection('Локальный пароль')
+  }
+
+  function leaveLocalPasswordSettings() {
+    setPrivacyError('')
+    setSettingsSection('Конфиденциальность')
+    setActiveNav(localPasswordOrigin)
+  }
+
+  function removeLocalPassword() {
+    if (!currentUserId) return
+    window.localStorage.removeItem(appLockStorageKey(currentUserId))
+    window.localStorage.removeItem(appLockedStorageKey(currentUserId))
+    setAppLockHash(null)
+    setAppLockSalt(null)
+    setAppLocked(false)
+    setCurrentLockPassword('')
+    setNewLockPassword('')
+    setNewLockPasswordRepeat('')
+    setLocalPasswordAccessGranted(false)
+    setPrivacyError('')
+    setSettingsSection('Конфиденциальность')
   }
 
   async function saveProfile(event: FormEvent) {
@@ -1893,7 +1966,7 @@ export default function App() {
       {activeNav === 'Настройки' && <section className="settings-menu notifications-settings-link"><p>ПРИЛОЖЕНИЕ</p><button className={settingsSection === 'Уведомления' ? 'active' : ''} onClick={() => { setSettingsSection('Уведомления'); setMobileSettingsOpen(true) }}><NotificationIcon /><strong>Уведомления</strong></button><button className={settingsSection === 'Оформление' ? 'active' : ''} onClick={() => { setSettingsSection('Оформление'); setMobileSettingsOpen(true) }}><SettingsIcon /><strong>Оформление</strong></button></section>}
       {activeNav === 'Профиль' && <section className="settings-menu profile-account-menu" onClick={() => setMobileSettingsOpen(true)}><p>АККАУНТ</p><button className={settingsSection === 'Профиль' ? 'active' : ''} onClick={() => setSettingsSection('Профиль')}><ProfileCircleIcon /><strong>Профиль</strong></button><button className={settingsSection === 'Оси' ? 'active' : ''} onClick={() => setSettingsSection('Оси')}><MoneyIcon /><strong>Оси</strong></button><button className={settingsSection === 'Конфиденциальность' ? 'active' : ''} onClick={() => setSettingsSection('Конфиденциальность')}><LockIcon /><strong>Конфиденциальность</strong></button><button className={settingsSection === 'Истории' ? 'active' : ''} onClick={() => { setSettingsSection('Истории'); setMobileSettingsOpen(true) }}><CameraIcon /><strong>Истории</strong></button></section>}
       <nav className="bottom-nav" aria-label="Основная навигация" style={{ '--active-offset': `calc(${navIndex * 100}% + ${navIndex * 6}px)` } as CSSProperties}>
-        {[['Чаты', MessageIcon], ['Профиль', ProfileCircleIcon], ['Настройки', SettingsIcon]].map(([label, Icon]) => <button key={label as string} onClick={() => { setSelectedProfile(null); setActiveNav(label as string); if (label === 'Настройки') setMobileSettingsOpen(false) }} className={activeNav === label ? 'active' : ''}><Icon /><span>{label as string}</span></button>)}
+        {[['Чаты', MessageIcon], ['Профиль', ProfileCircleIcon], ['Настройки', SettingsIcon]].map(([label, Icon]) => <button key={label as string} onClick={() => selectNavLabel(label as string)} className={activeNav === label ? 'active' : ''}><Icon /><span>{label as string}</span></button>)}
       </nav>
     </aside>
 
@@ -1903,10 +1976,13 @@ export default function App() {
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Оси' && <div className="page-view settings-view osi-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ВАЛЮТА</p><h2>Оси</h2><div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Ваш баланс</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div><p className="settings-description">Оси — внутренняя валюта Osirium. Пока её нельзя заработать, но баланс уже сохраняется в профиле.</p></div>}
     {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <div className="page-view settings-view admin-page admin-page-secondary"><p className="eyebrow">ДОСТУП И ВАЛЮТА</p><h2>Блокировка и Оси</h2><p className="settings-description">Выдавайте Оси или блокируйте аккаунты. Заблокированный пользователь не сможет войти и писать сообщения.</p><div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={`controls-${profile.id}`}><div><strong>@{profile.username}</strong><small>{profile.is_banned ? 'Заблокирован' : 'Активен'}</small></div><div className="admin-badge-actions"><input className="osi-amount-input" type="number" min="1" step="1" value={osiAmount} onChange={(event) => setOsiAmount(event.target.value)} aria-label="Количество Оси" /><button className="badge-idea" onClick={() => { void grantOsi(profile) }}>Выдать Оси</button><button className={profile.is_banned ? 'badge-unban' : 'badge-ban'} onClick={() => { void setUserBan(profile, !profile.is_banned) }}>{profile.is_banned ? 'Разблокировать' : 'Заблокировать'}</button></div></div>)}</div></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Истории' && <div className="page-view settings-view story-settings-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ИСТОРИИ</p><h2>Поделиться историей</h2><p className="settings-description">Истории видят только люди, с которыми у вас уже есть диалог. Через 24 часа они исчезают.</p><form className="story-form" onSubmit={publishStory}><input ref={storyInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" onChange={handleStorySelection} /><button type="button" className="story-add" onClick={() => storyInputRef.current?.click()}>Добавить историю</button><label>Размер<select value={storyAspectRatio} onChange={(event) => setStoryAspectRatio(event.target.value)}><option value="9:16">Вертикальный · 9:16</option><option value="1:1">Квадрат · 1:1</option><option value="16:9">Горизонтальный · 16:9</option></select></label>{storyPreviewUrl && <div className={`story-preview ratio-${storyAspectRatio.replace(':', '-')}`}>{storyFile?.type.startsWith('video/') ? <video src={storyPreviewUrl} controls /> : <img src={storyPreviewUrl} alt="Предпросмотр истории" />}{storyOverlayText && <strong>{storyOverlayText}</strong>}</div>}<label>Надпись на истории<input value={storyOverlayText} onChange={(event) => setStoryOverlayText(event.target.value.slice(0, 80))} maxLength={80} placeholder="Например, доброе утро" /></label><label>Описание<textarea value={storyDescription} onChange={(event) => setStoryDescription(event.target.value.slice(0, 180))} maxLength={180} placeholder="Описание истории" /></label><button className="story-publish" disabled={!storyFile || storyUploading}>{storyUploading ? 'Публикуем…' : 'Опубликовать'}</button>{storyError && <p className="privacy-error">{storyError}</p>}</form></div>}
-    {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Уведомления' && <div className="page-view settings-view notifications-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">УВЕДОМЛЕНИЯ</p><h2>Уведомления на iPhone</h2><p className="settings-description">Push-уведомления появятся после завершения настройки. На iPhone они работают только у Osirium, добавленного на экран «Домой».</p>{notificationPermission === 'default' && <button type="button" className="notification-enable" onClick={() => { void requestNotificationPermission() }}>Включить уведомления</button>}{notificationPermission === 'granted' && <p className="notification-status granted">Уведомления разрешены для этого устройства.</p>}{notificationPermission === 'denied' && <p className="notification-status">Уведомления запрещены. Включите их в настройках Osirium на устройстве.</p>}{notificationPermission === 'unsupported' && <p className="notification-status">Этот браузер не поддерживает уведомления.</p>}<ol className="notification-steps"><li>Откройте <b>www.osirium.lol</b> в Safari.</li><li>Нажмите кнопку «Поделиться» внизу браузера.</li><li>Выберите «На экран Домой» и подтвердите добавление.</li><li>Откройте Osirium с иконки на экране Домой.</li><li>В этом разделе появится кнопка включения уведомлений.</li></ol><p className="notification-note">Не запрашивайте разрешение в обычной вкладке Safari: iOS выдаёт его только веб‑приложению с экрана Домой.</p></div>}
+    {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Уведомления' && <div className="page-view settings-view notifications-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">УВЕДОМЛЕНИЯ</p><h2>Уведомления</h2><p className="settings-description">Подключите уведомления один раз — Osirium сохранит настройку на этом устройстве.</p><ol className="notification-steps"><li><b>iPhone.</b> Откройте Osirium в Safari, добавьте сайт на экран «Домой», затем включите уведомления уже в приложении.</li><li><b>Android.</b> Разрешите уведомления в Chrome или в установленном веб‑приложении.</li><li><b>ПК.</b> Разрешите уведомления для osirium.lol в браузере.</li><li>После включения разрешение и подключение сохраняются для этого устройства.</li></ol>{notificationPermission === 'granted' && <p className="notification-status granted">Уведомления разрешены для этого устройства.</p>}{notificationPermission === 'denied' && <p className="notification-status">Уведомления запрещены. Включите их в настройках браузера или устройства.</p>}{notificationPermission === 'unsupported' && <p className="notification-status">Этот браузер не поддерживает уведомления.</p>}<p className="notification-note">Если кнопка не срабатывает, проверьте разрешение уведомлений в настройках браузера или системы.</p>{notificationPermission === 'default' && <button type="button" className="notification-enable" onClick={() => { void requestNotificationPermission() }}>Включить уведомления</button>}</div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Оформление' && <div className="page-view settings-view appearance-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ПРИЛОЖЕНИЕ</p><h2>Оформление</h2><p className="settings-description">Выберите тему, которая будет использоваться на этом устройстве.</p><section className="theme-settings"><strong>Тема</strong><div><button type="button" className={theme === 'dark' ? 'active' : ''} onClick={(event) => switchTheme('dark', event)}>Тёмная</button><button type="button" className={theme === 'light' ? 'active' : ''} onClick={(event) => switchTheme('light', event)}>Белая</button></div></section></div>}
     {mobileSettingsOpen && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <button type="button" className="mobile-admin-return" aria-label="К настройкам" onClick={() => setMobileSettingsOpen(false)}><ArrowLeftIcon /></button>}
     <section className={`conversation ${selectedChat ? 'is-open' : ''} ${selectedConversation === favoritesConversationId ? 'favorites' : ''}`}>
+      {!selectedProfile && (activeNav === 'Настройки' || activeNav === 'Профиль') && settingsSection === 'Конфиденциальность' && <div className="local-password-page privacy-overview"><button type="button" className="mobile-page-back" onClick={() => { if (activeNav === 'Профиль') setSettingsSection('Профиль'); setMobileSettingsOpen(false) }}>← {activeNav === 'Профиль' ? 'К профилю' : 'К настройкам'}</button><p className="eyebrow">АККАУНТ</p><h2>Конфиденциальность</h2><button type="button" className="local-password-entry" onClick={openLocalPasswordSettings}><span><strong>Локальный пароль</strong><small>{appLockHash ? 'Код установлен на этом устройстве' : 'Защитите вход отдельным кодом'}</small></span><ArrowRightIcon /></button></div>}
+      {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Локальный пароль' && <div className="local-password-page"><button type="button" className="local-password-back" onClick={() => { setPrivacyError(''); setSettingsSection('Конфиденциальность') }}><ArrowLeftIcon /><span>Конфиденциальность</span></button><p className="eyebrow">КОНФИДЕНЦИАЛЬНОСТЬ</p><h2>Локальный пароль</h2><p className="settings-description">Отдельный код только для этого браузера. Он не меняет пароль аккаунта.</p>{appLockHash && !localPasswordAccessGranted ? <form className="privacy-form" onSubmit={verifyLocalPasswordForSettings}><label>Текущий код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={currentLockPassword} onChange={(event) => setCurrentLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="current-password" placeholder="Введите 6 цифр" /></label><button className="privacy-save">Продолжить</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form> : <form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="6 цифр" /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{appLockHash && <button type="button" className="local-password-remove" onClick={removeLocalPassword}>Убрать локальный пароль</button>}{privacyError && <p className="privacy-error">{privacyError}</p>}</form>}</div>}
+      {!selectedProfile && activeNav === 'Чаты' && selectedChat && <header className="mobile-conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="mobile-chat-profile" aria-label={`Открыть профиль ${selectedChat.display_name}`} onClick={() => { void openProfile(selectedChat) }}><span className="avatar small" style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(selectedChat.display_name || selectedChat.username)}</span><span><strong>{selectedChat.display_name || `@${selectedChat.username}`}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><small className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</small></span></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button></header>}
       {selectedProfile && <div className="profile-view"><button className="profile-back" onClick={() => { setSelectedProfile(null); setSelectedProfileBio('') }}>← Назад</button><span className="avatar profile-large" style={{ backgroundColor: selectedProfile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedProfile.avatar_path) ? <img src={profileAvatarUrl(selectedProfile.avatar_path) as string} alt="" /> : initials(selectedProfile.display_name || selectedProfile.username)}</span><h2>{selectedProfile.display_name || `@${selectedProfile.username}`}<RoleBadge isAdmin={selectedProfile.is_admin} badge={selectedProfile.badge} /></h2><p className="profile-status">@{selectedProfile.username}</p><div className="profile-info"><span>ОПИСАНИЕ</span><p>{selectedProfileLoading ? 'Загружаем…' : selectedProfileBio || `${selectedProfile.display_name || `@${selectedProfile.username}`} ещё не придумал что можно написать в описание ;<`}</p></div><button className="page-action" onClick={() => { void selectChat(selectedProfile) }}>Открыть диалог <ArrowRightIcon /></button></div>}
       {!selectedProfile && activeNav === 'Чаты' && (selectedChat ? <>
         <header className="conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button><button type="button" className="avatar small header-avatar" aria-label={`Открыть профиль ${selectedChat.display_name}`} onClick={() => { void openProfile(selectedChat) }} style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(selectedChat.display_name || selectedChat.username)}</button><div><strong>{selectedChat.display_name || `@${selectedChat.username}`}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><span className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</span></div></header>
