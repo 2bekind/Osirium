@@ -370,6 +370,7 @@ export default function App() {
   const [selectedProfileLoading, setSelectedProfileLoading] = useState(false)
   const [contacts, setContacts] = useState<Record<string, string>>({})
   const [contactLabel, setContactLabel] = useState('')
+  const [contactEditorOpen, setContactEditorOpen] = useState(false)
   const [contactSaving, setContactSaving] = useState(false)
   const [contactError, setContactError] = useState('')
   const [authenticated, setAuthenticated] = useState(!hasSupabase)
@@ -500,11 +501,12 @@ export default function App() {
   }
   const query = search.trim().toLowerCase()
   const isUserSearch = query.length >= 3
+  const displayNameFor = (profile: Pick<Profile, 'id' | 'username' | 'display_name'>) => contacts[profile.id] || profile.display_name || `@${profile.username}`
   const visibleChats = useMemo(
     () => chats
-      .filter((item) => `${item.username} ${item.display_name}`.toLowerCase().includes(query))
+      .filter((item) => `${item.username} ${item.display_name} ${contacts[item.id] || ''}`.toLowerCase().includes(query))
       .sort((left, right) => Number(right.is_pinned) - Number(left.is_pinned) || new Date(right.last_created_at || 0).getTime() - new Date(left.last_created_at || 0).getTime()),
-    [chats, query],
+    [chats, contacts, query],
   )
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -1000,6 +1002,7 @@ export default function App() {
     setSelectedProfile(profile)
     setSelectedProfileBio('')
     setContactLabel(contacts[profile.id] || profile.display_name || profile.username)
+    setContactEditorOpen(false)
     setContactError('')
     setSelectedProfileLoading(true)
     if (!supabase) {
@@ -1014,11 +1017,7 @@ export default function App() {
   async function saveContact(event: FormEvent) {
     event.preventDefault()
     if (!supabase || !currentUserId || !selectedProfile) return
-    const label = contactLabel.trim().slice(0, 48)
-    if (!label) {
-      setContactError('Введите имя для контакта.')
-      return
-    }
+    const label = contactLabel.trim().slice(0, 48) || selectedProfile.display_name || selectedProfile.username
     setContactSaving(true)
     setContactError('')
     const { error } = await supabase.from('contacts').upsert({ owner_id: currentUserId, contact_id: selectedProfile.id, label }, { onConflict: 'owner_id,contact_id' })
@@ -1028,6 +1027,26 @@ export default function App() {
       return
     }
     setContacts((current) => ({ ...current, [selectedProfile.id]: label }))
+    setContactEditorOpen(false)
+  }
+
+  async function deleteContact() {
+    if (!supabase || !currentUserId || !selectedProfile) return
+    setContactSaving(true)
+    setContactError('')
+    const { error } = await supabase.from('contacts').delete().eq('owner_id', currentUserId).eq('contact_id', selectedProfile.id)
+    setContactSaving(false)
+    if (error) {
+      setContactError('Не удалось удалить контакт.')
+      return
+    }
+    setContacts((current) => {
+      const next = { ...current }
+      delete next[selectedProfile.id]
+      return next
+    })
+    setContactLabel(selectedProfile.display_name || selectedProfile.username)
+    setContactEditorOpen(false)
   }
 
   async function loadLatestAnnouncement() {
@@ -1168,6 +1187,31 @@ export default function App() {
       range.oninput = () => { audio.currentTime = Number(range.value) * (audio.duration || 1) }
       player.append(play, range, time)
       audio.parentElement?.append(player)
+    })
+  })
+
+  useEffect(() => {
+    const pattern = /((?:https?:\/\/|www\.)[^\s<]+)/gi
+    document.querySelectorAll<HTMLElement>('.bubble-wrap .bubble').forEach((bubble) => {
+      if (bubble.querySelector('.message-link')) return
+      const textNode = Array.from(bubble.childNodes).find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())
+      const text = textNode?.textContent
+      if (!text || !pattern.test(text)) return
+      pattern.lastIndex = 0
+      const fragment = document.createDocumentFragment()
+      text.split(pattern).forEach((part) => {
+        if (!part) return
+        if (/(?:https?:\/\/|www\.)/i.test(part)) {
+          const link = document.createElement('a')
+          link.className = 'message-link'
+          link.href = part.startsWith('www.') ? `https://${part}` : part
+          link.target = '_blank'
+          link.rel = 'noopener noreferrer'
+          link.textContent = part
+          fragment.append(link)
+        } else fragment.append(document.createTextNode(part))
+      })
+      textNode.replaceWith(fragment)
     })
   })
 
@@ -2132,9 +2176,9 @@ export default function App() {
 
   const renderChatRow = (chat: Chat) => (
     <button key={chat.conversation_id} onClick={() => { void selectChat(chat) }} onContextMenu={(event) => { event.preventDefault(); openChatMenu(chat, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startChatHold(chat, touch.clientX, touch.clientY) }} onTouchMove={clearChatHold} onTouchEnd={clearChatHold} onTouchCancel={clearChatHold} className={`chat-row ${chat.conversation_id === selectedConversation ? 'selected' : ''} ${chat.is_pinned ? 'pinned' : ''}`}>
-      <span className={`avatar ${chat.conversation_id === favoritesConversationId ? 'favorites-avatar' : ''}`} style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{chat.conversation_id === favoritesConversationId ? <StarIcon /> : profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(chat.display_name || chat.username)}</span>
+      <span className={`avatar ${chat.conversation_id === favoritesConversationId ? 'favorites-avatar' : ''}`} style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{chat.conversation_id === favoritesConversationId ? <StarIcon /> : profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(displayNameFor(chat))}</span>
       <span className="chat-copy">
-        <span className="chat-line"><strong>{chat.display_name || `@${chat.username}`}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}</time></span>
+        <span className="chat-line"><strong>{displayNameFor(chat)}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}</time></span>
         <span className={`chat-line ${formatPresence(chat.hidden_presence_since || chat.last_seen_at, Boolean(chat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}`}><small>{formatPresence(chat.hidden_presence_since || chat.last_seen_at, Boolean(chat.hidden_presence_since))} · {formatPreview(chat.last_body)}</small></span>
       </span>
     </button>
@@ -2142,8 +2186,8 @@ export default function App() {
 
   const renderUserResult = (profile: Profile) => (
     <button key={profile.id} onClick={() => { void startDirectChat(profile) }} className="chat-row search-result" disabled={directChatLoading === profile.id}>
-      <span className="avatar" style={{ backgroundColor: profile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(profile.avatar_path) ? <img src={profileAvatarUrl(profile.avatar_path) as string} alt="" /> : initials(profile.display_name || profile.username)}</span>
-      <span className="chat-copy"><span className="chat-line"><strong>{profile.display_name || `@${profile.username}`}<RoleBadge isAdmin={profile.is_admin} badge={profile.badge} /></strong></span><span className="chat-line"><small>@{profile.username} · {directChatLoading === profile.id ? 'Открываем диалог…' : 'Начать диалог'}</small></span></span>
+      <span className="avatar" style={{ backgroundColor: profile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(profile.avatar_path) ? <img src={profileAvatarUrl(profile.avatar_path) as string} alt="" /> : initials(displayNameFor(profile))}</span>
+      <span className="chat-copy"><span className="chat-line"><strong>{displayNameFor(profile)}<RoleBadge isAdmin={profile.is_admin} badge={profile.badge} /></strong></span><span className="chat-line"><small>@{profile.username} · {directChatLoading === profile.id ? 'Открываем диалог…' : 'Начать диалог'}</small></span></span>
     </button>
   )
 
@@ -2200,10 +2244,27 @@ export default function App() {
     <section className={`conversation ${selectedChat ? 'is-open' : ''} ${selectedConversation === favoritesConversationId ? 'favorites' : ''}`}>
       {!selectedProfile && (activeNav === 'Настройки' || activeNav === 'Профиль') && settingsSection === 'Конфиденциальность' && <div className="local-password-page privacy-overview"><button type="button" className="mobile-page-back" onClick={() => { if (activeNav === 'Профиль') setSettingsSection('Профиль'); setMobileSettingsOpen(false) }}>← {activeNav === 'Профиль' ? 'К профилю' : 'К настройкам'}</button><p className="eyebrow">АККАУНТ</p><h2>Конфиденциальность</h2><button type="button" className="local-password-entry" onClick={openLocalPasswordSettings}><span><strong>Локальный пароль</strong><small>{appLockHash ? 'Код установлен на этом устройстве' : 'Защитите вход отдельным кодом'}</small></span><ArrowRightIcon /></button></div>}
       {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Локальный пароль' && <div className="local-password-page"><button type="button" className="local-password-back" onClick={() => { setPrivacyError(''); setSettingsSection('Конфиденциальность') }}><ArrowLeftIcon /><span>Конфиденциальность</span></button><p className="eyebrow">КОНФИДЕНЦИАЛЬНОСТЬ</p><h2>Локальный пароль</h2><p className="settings-description">Отдельный код только для этого браузера. Он не меняет пароль аккаунта.</p>{appLockHash && !localPasswordAccessGranted ? <form className="privacy-form" onSubmit={verifyLocalPasswordForSettings}><label>Текущий код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={currentLockPassword} onChange={(event) => setCurrentLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="current-password" placeholder="Введите 6 цифр" /></label><button className="privacy-save">Продолжить</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form> : <form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="6 цифр" /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{appLockHash && <button type="button" className="local-password-remove" onClick={removeLocalPassword}>Убрать локальный пароль</button>}{privacyError && <p className="privacy-error">{privacyError}</p>}</form>}</div>}
-      {!selectedProfile && activeNav === 'Чаты' && selectedChat && <header className="mobile-conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="mobile-chat-profile" aria-label={`Открыть профиль ${selectedChat.display_name}`} onClick={() => { void openProfile(selectedChat) }}><span className="avatar small" style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(selectedChat.display_name || selectedChat.username)}</span><span><strong>{selectedChat.display_name || `@${selectedChat.username}`}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><small className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</small></span></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button></header>}
-      {selectedProfile && <div className="profile-view"><button className="profile-back" onClick={() => { setSelectedProfile(null); setSelectedProfileBio('') }}>← Назад</button><span className="avatar profile-large" style={{ backgroundColor: selectedProfile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedProfile.avatar_path) ? <img src={profileAvatarUrl(selectedProfile.avatar_path) as string} alt="" /> : initials(selectedProfile.display_name || selectedProfile.username)}</span><h2>{selectedProfile.display_name || `@${selectedProfile.username}`}<RoleBadge isAdmin={selectedProfile.is_admin} badge={selectedProfile.badge} /></h2><p className="profile-status">@{selectedProfile.username}</p><div className="profile-info"><span>ОПИСАНИЕ</span><p>{selectedProfileLoading ? 'Загружаем…' : selectedProfileBio || `${selectedProfile.display_name || `@${selectedProfile.username}`} ещё не придумал что можно написать в описание ;<`}</p></div><button className="page-action" onClick={() => { void selectChat(selectedProfile) }}>Открыть диалог <ArrowRightIcon /></button></div>}
+      {!selectedProfile && activeNav === 'Чаты' && selectedChat && <header className="mobile-conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="mobile-chat-profile" aria-label={`Открыть профиль ${displayNameFor(selectedChat)}`} onClick={() => { void openProfile(selectedChat) }}><span className="avatar small" style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedChat))}</span><span><strong>{displayNameFor(selectedChat)}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><small className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</small></span></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button></header>}
+      {selectedProfile && <div className="profile-view">
+        <button type="button" className="profile-back" aria-label="Назад" onClick={() => { setSelectedProfile(null); setSelectedProfileBio(''); setContactEditorOpen(false) }}><ArrowLeftIcon /></button>
+        <span className="avatar profile-large" style={{ backgroundColor: selectedProfile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedProfile.avatar_path) ? <img src={profileAvatarUrl(selectedProfile.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedProfile))}</span>
+        <h2>{displayNameFor(selectedProfile)}<RoleBadge isAdmin={selectedProfile.is_admin} badge={selectedProfile.badge} /></h2>
+        <p className="profile-status">@{selectedProfile.username}</p>
+        <div className="profile-info"><span>ОПИСАНИЕ</span><p>{selectedProfileLoading ? 'Загружаем…' : selectedProfileBio || `${displayNameFor(selectedProfile)} ещё не придумал что можно написать в описание ;<`}</p></div>
+        <button className="page-action" onClick={() => { void selectChat(selectedProfile) }}>Открыть диалог <ArrowRightIcon /></button>
+        {!contactEditorOpen ? <button type="button" className="contact-entry-button" onClick={() => { setContactEditorOpen(true); setContactError('') }}>{contacts[selectedProfile.id] ? 'Изменить контакт' : 'Добавить в контакты'}</button> : <div className="contact-sheet-overlay" onClick={() => setContactEditorOpen(false)}>
+          <form className="contact-sheet" onSubmit={saveContact} onClick={(event) => event.stopPropagation()}>
+            <span>{contacts[selectedProfile.id] ? 'Изменить контакт' : 'Добавить в контакты'}</span>
+            <label>Как записать человека<input autoFocus value={contactLabel} onChange={(event) => setContactLabel(event.target.value.slice(0, 48))} maxLength={48} placeholder="Имя контакта" /></label>
+            {contacts[selectedProfile.id] && <p className="contact-sheet-hint">Оставьте поле пустым, чтобы вернуть исходный display-ник.</p>}
+            <button disabled={contactSaving}>{contactSaving ? 'Сохраняем…' : contacts[selectedProfile.id] ? 'Сохранить имя' : 'Добавить в контакты'}</button>
+            {contacts[selectedProfile.id] && <button type="button" className="contact-delete-button" disabled={contactSaving} onClick={() => { void deleteContact() }}>Удалить контакт</button>}
+            {contactError && <small>{contactError}</small>}
+          </form>
+        </div>}
+      </div>}
       {!selectedProfile && activeNav === 'Чаты' && (selectedChat ? <>
-        <header className="conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button><button type="button" className="avatar small header-avatar" aria-label={`Открыть профиль ${selectedChat.display_name}`} onClick={() => { void openProfile(selectedChat) }} style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(selectedChat.display_name || selectedChat.username)}</button><div><strong>{selectedChat.display_name || `@${selectedChat.username}`}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><span className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</span></div></header>
+        <header className="conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button><button type="button" className="avatar small header-avatar" aria-label={`Открыть профиль ${displayNameFor(selectedChat)}`} onClick={() => { void openProfile(selectedChat) }} style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedChat))}</button><div><strong>{displayNameFor(selectedChat)}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><span className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</span></div></header>
       {selectedChat.blocked_by_other && <div className="system-message"><strong>Ось-Бот</strong><span>Ваши последующие сообщения не будут видны собеседнику, увы он вас заблокировал ;&lt;&lt;</span></div>}
       {pinnedMessage && <button type="button" className="pinned-message" onClick={() => openMessageMenu(pinnedMessage, window.innerWidth / 2, 110)}><strong>Закреплённое сообщение</strong><span>{pinnedMessage.image_path ? 'Фотография' : pinnedMessage.body}</span></button>}
       {selectedConversation === favoritesConversationId && <label className="favorites-search"><SearchIcon /><input value={favoritesSearch} onChange={(event) => setFavoritesSearch(event.target.value)} placeholder="Поиск в Избранном" /></label>}<div className="messages">{displayedMessages.map((message, index) => <div key={message.id}>{(index === 0 || messageDayKey(displayedMessages[index - 1].created_at) !== messageDayKey(message.created_at)) && <div className="date-label">{messageDateLabel(message.created_at)}</div>}<div className={`bubble-wrap ${message.sender_id === currentUserId ? 'mine' : ''}`} data-message-id={message.id} onContextMenu={(event) => { event.preventDefault(); openMessageMenu(message, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startMessageHold(message, touch.clientX, touch.clientY) }} onTouchMove={clearMessageHold} onTouchEnd={clearMessageHold} onTouchCancel={clearMessageHold}><div className="bubble">{message.forwarded_from_id && <small className="message-forwarded">Пересланное сообщение</small>}{message.reply_to_id && <span className="message-reply">{message.reply_sender_id === currentUserId ? 'Вы' : 'Ответ'} · {message.reply_body || 'Сообщение недоступно'}</span>}{message.image_path && (messageImageUrls[message.id] ? <button type="button" className="message-image-button" aria-label="Открыть фотографию" onClick={() => { resetImageZoom(); setOpenedImage({ src: messageImageUrls[message.id], name: message.image_name || 'Фотография' }) }}><img className={`message-image ${loadedMessageImages[message.id] ? 'is-loaded' : ''}`} src={messageImageUrls[message.id]} alt={message.image_name || 'Фотография'} onLoad={() => setLoadedMessageImages((current) => ({ ...current, [message.id]: true }))} /></button> : <span className="image-loading">Загрузка фото…</span>)}{message.audio_path && (messageImageUrls[message.id] ? <div className="voice-message"><span>Голосовое · {message.audio_duration || 0} сек.</span><audio controls preload="metadata" src={messageImageUrls[message.id]} /></div> : <span className="image-loading">Загрузка голосового…</span>)}{!message.image_path && !message.audio_path && message.body}<time>{formatTime(message.created_at)}{message.edited_at && <span> · изм.</span>}{message.sender_id === currentUserId && message.read_at && <span className="read-receipt" aria-label="Прочитано"><CheckIcon /></span>}</time></div></div></div>)}{chatError && <p className="chat-error">{chatError}</p>}</div>
@@ -2217,7 +2278,24 @@ export default function App() {
     <audio ref={remoteAudioRef} autoPlay />{callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок"><div className="call-card"><span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}</span><h2>{callTarget.display_name || `@${callTarget.username}`}</h2><p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : 'Не удалось получить доступ к микрофону'}</p>{(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}{callStatus === 'incoming' && <div className="call-actions"><button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button><button type="button" className="call-hangup" onClick={declineCall}>Отклонить</button></div>}{callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => endCall()}>Завершить звонок</button>}</div></div>}
 
     {chatMenu && <div className="message-menu-layer" onClick={() => setChatMenu(null)}><div className="message-menu chat-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(event) => event.stopPropagation()}>{chatMenu.mode === 'actions' ? <><button onClick={() => { void toggleChatPin(chatMenu.chat) }}>{chatMenu.chat.is_pinned ? 'Открепить чат' : 'Закрепить чат'}</button><button onClick={() => { void toggleChatMute(chatMenu.chat) }}>{chatMenu.chat.is_muted ? 'Включить звук' : 'Без звука'}</button>{chatMenu.chat.is_blocked ? <button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false, false) }}>Разблокировать</button> : <button className="message-menu-danger" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'block' } : null)}>Заблокировать</button>}</> : <><p>Заблокировать пользователя</p><button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false) }}>Заблокировать</button><button onClick={() => { void setChatBlock(chatMenu.chat, true) }}>Заблокировать скрытно</button><button className="message-menu-back" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
-    {messageMenu && <div className="message-menu-layer" onClick={() => setMessageMenu(null)}><div className="message-menu" style={{ left: messageMenu.x, top: messageMenu.y }} onClick={(event) => event.stopPropagation()}>{messageMenu.mode === 'actions' ? <><button onClick={() => beginReply(messageMenu.message)}>Ответить</button><button onClick={() => { setForwardingMessage(messageMenu.message); setMessageMenu(null) }}>Переслать</button><button onClick={() => { void copyMessage(messageMenu.message) }}>Копировать</button>{messageMenu.message.sender_id === currentUserId && !messageMenu.message.image_path && !messageMenu.message.audio_path && <button onClick={() => beginEdit(messageMenu.message)}>Изменить</button>}<button onClick={() => { void toggleMessagePin(messageMenu.message) }}>{pinnedMessage?.id === messageMenu.message.id ? 'Открепить сообщение' : 'Закрепить сообщение'}</button><button className="message-menu-danger" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'delete' } : null)}>Удалить</button></> : <><p>Удалить сообщение</p>{messageMenu.message.sender_id === currentUserId && <button className="message-menu-danger" onClick={() => { void deleteMessage(messageMenu.message, true) }}>Удалить у всех</button>}<button onClick={() => { void deleteMessage(messageMenu.message, false) }}>Удалить у себя</button><button className="message-menu-back" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
+    {messageMenu && <div className="message-menu-layer" onClick={() => setMessageMenu(null)}>
+      <div className="message-menu" style={{ left: messageMenu.x, top: messageMenu.y }} onClick={(event) => event.stopPropagation()}>
+        {messageMenu.mode === 'actions' ? <>
+          <button onClick={() => beginReply(messageMenu.message)}>Ответить</button>
+          <button onClick={() => { setForwardingMessage(messageMenu.message); setMessageMenu(null) }}>Переслать</button>
+          <button onClick={() => { void copyMessage(messageMenu.message) }}>Копировать</button>
+          {messageMenu.message.sender_id === currentUserId && !messageMenu.message.image_path && !messageMenu.message.audio_path && <button onClick={() => beginEdit(messageMenu.message)}>Изменить</button>}
+          <button onClick={() => { void toggleMessagePin(messageMenu.message) }}>{pinnedMessage?.id === messageMenu.message.id ? 'Открепить сообщение' : 'Закрепить сообщение'}</button>
+          {messageMenu.message.audio_path && <button onClick={() => { void downloadVoiceMessage(messageMenu.message) }}>Скачать голосовое</button>}
+          <button className="message-menu-danger" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'delete' } : null)}>Удалить</button>
+        </> : <>
+          <p>Удалить сообщение</p>
+          {messageMenu.message.sender_id === currentUserId && <button className="message-menu-danger" onClick={() => { void deleteMessage(messageMenu.message, true) }}>Удалить у всех</button>}
+          <button onClick={() => { void deleteMessage(messageMenu.message, false) }}>Удалить у себя</button>
+          <button className="message-menu-back" onClick={() => setMessageMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button>
+        </>}
+      </div>
+    </div>}
     {forwardingMessage && <div className="forward-overlay" onClick={() => setForwardingMessage(null)}><section className="forward-sheet" onClick={(event) => event.stopPropagation()}><h3>Переслать сообщение</h3>{favoriteChat && <button onClick={() => { void forwardMessage(favoriteChat) }}>★ Избранное</button>}{chats.map((chat) => <button key={chat.conversation_id} onClick={() => { void forwardMessage(chat) }}>{chat.display_name || `@${chat.username}`}</button>)}</section></div>}
     {openedImage && <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Просмотр фотографии" onClick={() => setOpenedImage(null)}><button type="button" className="image-viewer-close" aria-label="Закрыть фотографию" onClick={() => setOpenedImage(null)}>×</button><img className="image-viewer-photo" src={openedImage.src} alt={openedImage.name} style={{ transform: `scale(${imageScale})` }} onWheel={handleImageWheel} onTouchStart={handleImageTouchStart} onTouchMove={handleImageTouchMove} onTouchEnd={() => { imagePinchRef.current = null }} onDoubleClick={resetImageZoom} onClick={(event) => event.stopPropagation()} /><span>{openedImage.name}</span></div>}
     {appLocked && <div className="app-lock-overlay" role="dialog" aria-modal="true" aria-label="Osirium заблокирован"><form className="app-lock-card" onSubmit={unlockApp}><h2>Введите код</h2><p>Osirium был заблокирован после периода бездействия.</p><input autoFocus type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={lockAttempt} onChange={(event) => setLockAttempt(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="current-password" placeholder="6 цифр" /><button>Разблокировать</button>{lockError && <span className="app-lock-error">{lockError}</span>}</form></div>}
@@ -2225,8 +2303,6 @@ export default function App() {
     {avatarCropUrl && <div className="avatar-crop-overlay" role="dialog" aria-modal="true"><div className="avatar-crop-card"><h2>Настроить аватар</h2><p>Перетаскивай фото, масштабируй колесом или ползунком.</p><div className="avatar-crop-frame" onWheel={(event) => { event.preventDefault(); setAvatarCropZoom((value) => Math.max(1, Math.min(3, value - event.deltaY * .001))) }} onPointerDown={(event) => { avatarCropDragRef.current = { x: event.clientX, y: event.clientY, offsetX: avatarCropOffset.x, offsetY: avatarCropOffset.y }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { const drag = avatarCropDragRef.current; if (drag) setAvatarCropOffset({ x: drag.offsetX + event.clientX - drag.x, y: drag.offsetY + event.clientY - drag.y }) }} onPointerUp={() => { avatarCropDragRef.current = null }}><img src={avatarCropUrl} alt="Настройка аватара" style={{ transform: `translate(${avatarCropOffset.x}px, ${avatarCropOffset.y}px) scale(${avatarCropZoom})` }} /></div><label className="avatar-crop-zoom">Масштаб<input type="range" min="1" max="3" step="0.01" value={avatarCropZoom} onChange={(event) => setAvatarCropZoom(Number(event.target.value))} /></label>{avatarCropFile?.type === 'image/gif' && <small>GIF сохранится анимированным; для него используется исходный кадр без обрезки.</small>}<div><button type="button" className="avatar-crop-cancel" onClick={() => { if (avatarCropUrl) URL.revokeObjectURL(avatarCropUrl); setAvatarCropUrl(null); setAvatarCropFile(null) }}>Отмена</button><button type="button" className="avatar-crop-save" onClick={() => { void saveAvatarCrop() }} disabled={avatarUploading}>{avatarUploading ? 'Сохраняем…' : 'Сохранить аватар'}</button></div></div></div>}
     {openedStory && !storyUrls[openedStory.story_id] && storyViewerError && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className="story-access-error" onClick={(event) => event.stopPropagation()}><strong>История недоступна</strong><span>{storyViewerError}</span></div></div>}
     {openedStory && storyUrls[openedStory.story_id] && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className={`story-viewer-media ratio-${openedStory.aspect_ratio.replace(':', '-')}`} onClick={(event) => event.stopPropagation()}>{openedStory.media_type === 'video' ? <video className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} controls autoPlay onCanPlay={() => setStoryMediaLoaded(true)} /> : <img className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} alt="История" onLoad={() => setStoryMediaLoaded(true)} />}{previousStory && <button type="button" className="story-step story-step-previous" aria-label="Предыдущая история" onClick={() => { void openStory(previousStory) }}><ArrowRightIcon /></button>}{nextStory && <button type="button" className="story-step story-step-next" aria-label="Следующая история" onClick={() => { void openStory(nextStory) }}><ArrowRightIcon /></button>}{openedStory.user_id === currentUserId && <button type="button" className="story-viewers-toggle" onClick={() => { setStoryViewersOpen((value) => !value); if (!storyViewersOpen) void loadStoryViewers(openedStory.story_id) }}>Зрители{storyViewers.length ? ` · ${storyViewers.length}` : ''}</button>}<div className="story-viewer-copy"><strong>{openedStory.overlay_text}</strong><p>{openedStory.description}</p></div>{openedStory.user_id !== currentUserId && <form className="story-reply" onSubmit={replyToStory}><input value={storyReply} onChange={(event) => setStoryReply(event.target.value.slice(0, 500))} placeholder="Написать сообщение" maxLength={500} /><button type="button" className={`story-reaction ${storyReaction ? 'active' : ''}`} aria-label="Поставить реакцию" onClick={() => { void reactToStory() }}><img src="/story-reaction.png" alt="" /></button><button className="story-reply-send" disabled={storyReplying || !storyReply.trim()} aria-label="Отправить ответ"><ArrowRightIcon /></button></form>}{storyViewersOpen && openedStory.user_id === currentUserId && <div className="story-viewers"><strong>Зрители</strong>{storyViewerError && <small>{storyViewerError}</small>}{storyViewers.length ? storyViewers.map((viewer) => <div className="story-viewer-user" key={viewer.user_id}><span className="avatar" style={{ backgroundColor: viewer.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(viewer.avatar_path) ? <img src={profileAvatarUrl(viewer.avatar_path) as string} alt="" /> : initials(viewer.display_name || viewer.username)}</span><span>{viewer.display_name || `@${viewer.username}`}<small>Просмотрено в {formatTime(viewer.viewed_at)}</small></span>{viewer.reaction === 'heart' && <img src="/story-reaction.png" alt="Реакция" />}</div>) : <p>Пока никто не посмотрел.</p>}</div>}{storyViewerError && !storyViewersOpen && <span className="story-viewer-error">{storyViewerError}</span>}</div></div>}
-    {selectedProfile && <form className="contact-sheet" onSubmit={saveContact}><span>КОНТАКТ</span><label>Как записать человека<input value={contactLabel} onChange={(event) => setContactLabel(event.target.value.slice(0, 48))} maxLength={48} placeholder="Имя контакта" /></label><button disabled={contactSaving}>{contactSaving ? 'Сохраняем…' : contacts[selectedProfile.id] ? 'Сохранить имя' : 'Добавить в контакты'}</button>{contactError && <small>{contactError}</small>}</form>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && currentIsAdmin && <div className="admin-audit-float"><p className="eyebrow">ЖУРНАЛ</p><h3>Действия администратора</h3><div className="admin-audit-list">{adminAudit.length ? adminAudit.map((entry) => <div className="admin-audit-row" key={entry.id}><div><strong>{entry.action === 'badge' ? 'Бейдж' : entry.action === 'ban' ? 'Блокировка' : 'Выдача Оси'} · @{entry.username}</strong><small>{formatTime(entry.created_at)}{entry.undone_at ? ' · отменено' : ''}</small></div>{!entry.undone_at && <button type="button" onClick={() => { void undoAdminAudit(entry) }}>Отменить</button>}</div>) : <p className="list-note">Действий пока нет.</p>}</div></div>}
-    {messageMenu?.message.audio_path && messageMenu.mode === 'actions' && <button type="button" className="voice-download-menu" style={{ left: messageMenu.x, top: messageMenu.y + 205 }} onClick={() => { void downloadVoiceMessage(messageMenu.message) }}>Скачать голосовое</button>}
   </main>
 }
