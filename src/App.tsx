@@ -82,6 +82,12 @@ type AdminAudit = {
   undone_at: string | null
 }
 
+type AdminAnnouncement = {
+  id: string
+  body: string
+  created_at: string
+}
+
 type CallSignal = {
   call_id: string
   conversation_id: string
@@ -174,8 +180,11 @@ function formatTime(value: string | null) {
 }
 
 function formatPresence(value: string | null, forceOffline = false) {
+  if (!value) return 'недавно'
+  if (!forceOffline && Date.now() - new Date(value).getTime() < 15_000) return 'в сети'
+  return 'недавно'
   if (!value) return 'давненько не заходил'
-  const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60_000))
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(value || '').getTime()) / 60_000))
   if (!forceOffline && minutes < 2) return 'в сети'
   if (forceOffline && minutes < 60) return 'был в сети 1 д. назад'
   if (minutes < 60) return `был в сети ${minutes} мин. назад`
@@ -302,6 +311,41 @@ function vapidKeyBytes(value: string) {
   return Uint8Array.from(source, (character) => character.charCodeAt(0))
 }
 
+function VoicePlayer({ src, duration }: { src: string; duration: number | null }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [playing, setPlaying] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [currentTime, setCurrentTime] = useState(0)
+
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    const update = () => {
+      setCurrentTime(audio.currentTime)
+      setProgress(audio.duration ? audio.currentTime / audio.duration : 0)
+    }
+    const ended = () => setPlaying(false)
+    audio.addEventListener('timeupdate', update)
+    audio.addEventListener('ended', ended)
+    return () => { audio.removeEventListener('timeupdate', update); audio.removeEventListener('ended', ended) }
+  }, [])
+
+  const toggle = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    if (audio.paused) { void audio.play(); setPlaying(true) } else { audio.pause(); setPlaying(false) }
+  }
+  const seek = (event: ChangeEvent<HTMLInputElement>) => {
+    const audio = audioRef.current
+    if (!audio) return
+    const value = Number(event.target.value)
+    audio.currentTime = value * (audio.duration || duration || 1)
+    setProgress(value)
+  }
+  const shownDuration = Math.max(0, Math.round(audioRef.current?.duration || duration || 0))
+  return <div className="voice-player"><audio ref={audioRef} src={src} preload="metadata" /><button type="button" className="voice-play" onClick={toggle} aria-label={playing ? 'Пауза' : 'Воспроизвести'}>{playing ? 'Ⅱ' : '▶'}</button><input className="voice-progress" type="range" min="0" max="1" step="0.01" value={progress} onChange={seek} aria-label="Прогресс голосового" /><span className="voice-time">{Math.round(currentTime)} / {shownDuration}</span></div>
+}
+
 export default function App() {
   const [chats, setChats] = useState<Chat[]>([])
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null)
@@ -343,6 +387,10 @@ export default function App() {
   const [adminResults, setAdminResults] = useState<Profile[]>([])
   const [adminLoading, setAdminLoading] = useState(false)
   const [adminError, setAdminError] = useState('')
+  const [latestAnnouncement, setLatestAnnouncement] = useState<AdminAnnouncement | null>(null)
+  const [announcementDraft, setAnnouncementDraft] = useState('')
+  const [announcementSaving, setAnnouncementSaving] = useState(false)
+  const [announcementError, setAnnouncementError] = useState('')
   const [osiAmount, setOsiAmount] = useState('100')
   const [adminAudit, setAdminAudit] = useState<AdminAudit[]>([])
   const [profileSaving, setProfileSaving] = useState(false)
@@ -374,6 +422,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false)
   const [chatError, setChatError] = useState('')
   const [sending, setSending] = useState(false)
+  const [sendAnimating, setSendAnimating] = useState(false)
+  const [, setPresenceTick] = useState(0)
   const [photoUploading, setPhotoUploading] = useState(false)
   const [voiceRecording, setVoiceRecording] = useState(false)
   const [voiceLocked, setVoiceLocked] = useState(false)
@@ -386,6 +436,7 @@ export default function App() {
   const [storyReply, setStoryReply] = useState('')
   const [storyReplying, setStoryReplying] = useState(false)
   const [storyReaction, setStoryReaction] = useState<'heart' | null>(null)
+  const [messageReactions, setMessageReactions] = useState<Record<string, boolean>>({})
   const [storyViewers, setStoryViewers] = useState<StoryViewer[]>([])
   const [storyViewersOpen, setStoryViewersOpen] = useState(false)
   const [storyViewerError, setStoryViewerError] = useState('')
@@ -459,6 +510,11 @@ export default function App() {
     document.documentElement.dataset.theme = theme
     window.localStorage.setItem('osirium:theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setPresenceTick((value) => value + 1), 5000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   function switchTheme(nextTheme: 'dark' | 'light', event: ReactMouseEvent<HTMLButtonElement>) {
     if (nextTheme === theme) return
@@ -538,6 +594,38 @@ export default function App() {
     void supabase.functions.invoke('send-push', { body: { message_id: message.id } })
   }
 
+  function notifyStoryPublished(storyId: string) {
+    if (!supabase) return
+    void supabase.functions.invoke('send-push', { body: { story_id: storyId, event: 'story_published' } })
+  }
+
+  function notifyStoryReaction(storyId: string) {
+    if (!supabase) return
+    void supabase.functions.invoke('send-push', { body: { story_id: storyId, event: 'story_reaction' } })
+  }
+
+  function notifyMessageReaction(messageId: string) {
+    if (!supabase) return
+    void supabase.functions.invoke('send-push', { body: { message_id: messageId, event: 'message_reaction' } })
+  }
+
+  async function toggleMessageReaction(message: Message) {
+    const next = !messageReactions[message.id]
+    if (selectedConversation === favoritesConversationId) {
+      setMessageReactions((current) => ({ ...current, [message.id]: next }))
+      return
+    }
+    if (!supabase || !currentUserId) return
+    const { data, error } = await supabase.rpc('toggle_message_reaction', { p_message_id: message.id, p_reaction: 'heart' })
+    if (error) {
+      setChatError(`Не удалось поставить реакцию: ${error.message}`)
+      return
+    }
+    const active = Boolean(data)
+    setMessageReactions((current) => ({ ...current, [message.id]: active }))
+    if (active && message.sender_id !== currentUserId) notifyMessageReaction(message.id)
+  }
+
   const loadStories = useCallback(async () => {
     if (!supabase) return
     const { data, error } = await supabase.rpc('list_contact_stories')
@@ -605,15 +693,43 @@ export default function App() {
   }, [loadImageUrls, loadPinnedMessage])
 
   useEffect(() => {
+    if (!sending && selectedConversation && !appLocked) {
+      window.requestAnimationFrame(() => composerInputRef.current?.focus())
+    }
+  }, [sending, selectedConversation, appLocked])
+
+  useEffect(() => {
+    const button = document.querySelector<HTMLButtonElement>('.composer .send')
+    button?.classList.toggle('is-sending', sendAnimating)
+  }, [sendAnimating])
+
+  useEffect(() => {
+    const messagesRoot = document.querySelector('.messages')
+    if (!messagesRoot) return
+    const handleDoubleClick = (event: Event) => {
+      const target = (event.target as HTMLElement).closest<HTMLElement>('[data-message-id]')
+      const message = target ? messages.find((item) => item.id === target.dataset.messageId) : null
+      if (message) void toggleMessageReaction(message)
+    }
+    messagesRoot.addEventListener('dblclick', handleDoubleClick)
+    return () => messagesRoot.removeEventListener('dblclick', handleDoubleClick)
+  })
+
+  useEffect(() => {
+    document.querySelectorAll<HTMLElement>('.messages [data-message-id]').forEach((element) => {
+      element.classList.toggle('message-reacted', Boolean(messageReactions[element.dataset.messageId || '']))
+    })
+  }, [messageReactions, messages])
+
+  useEffect(() => {
     if (!supabase) {
-      const timer = window.setTimeout(() => setAppBooting(false), 1500)
-      return () => window.clearTimeout(timer)
+      setAppBooting(false)
+      return
     }
     const client = supabase
     let active = true
     const finishBoot = () => {
-      const remaining = Math.max(0, 1500 - (Date.now() - bootStartedAtRef.current))
-      window.setTimeout(() => { if (active) setAppBooting(false) }, remaining)
+      if (active) setAppBooting(false)
     }
 
     const hydrate = async (session: Session | null) => {
@@ -659,6 +775,7 @@ export default function App() {
         resolveWithin(loadChats()),
         resolveWithin(loadStories()),
         resolveWithin(loadContacts()),
+        resolveWithin(loadLatestAnnouncement()),
       ])
       finishBoot()
     }
@@ -798,8 +915,10 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'messages', filter: `conversation_id=eq.${selectedConversation}` }, (payload) => {
         const message = payload.new as Message
         const incomingBlocked = message.sender_id !== currentUserId && selectedChat?.is_blocked
+        const container = document.querySelector<HTMLElement>('.messages')
+        if (container && container.scrollHeight - container.scrollTop - container.clientHeight < 180) scrollToLatestMessageRef.current = true
         if (!incomingBlocked) setMessages((current) => current.some((item) => item.id === message.id) ? current.map((item) => item.id === message.id ? { ...item, ...message } : item) : [...current, message])
-        if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId) setChats((current) => current.map((chat) => chat.id === message.sender_id ? { ...chat, last_seen_at: new Date().toISOString() } : chat))
+        if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId) setChats((current) => current.map((chat) => chat.id === message.sender_id ? { ...chat, last_seen_at: new Date().toISOString(), hidden_presence_since: null } : chat))
         if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId && !selectedChat?.is_muted && !incomingBlocked) {
           const sound = notificationAudioRef.current
           if (sound) {
@@ -819,7 +938,7 @@ export default function App() {
     if (!scrollToLatestMessageRef.current) return
     const frame = window.requestAnimationFrame(() => {
       const container = document.querySelector<HTMLElement>('.messages')
-      if (container) container.scrollTop = container.scrollHeight
+      if (container) container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
       scrollToLatestMessageRef.current = false
     })
     return () => window.cancelAnimationFrame(frame)
@@ -911,6 +1030,33 @@ export default function App() {
     setContacts((current) => ({ ...current, [selectedProfile.id]: label }))
   }
 
+  async function loadLatestAnnouncement() {
+    if (!supabase) return
+    const { data, error } = await supabase.rpc('get_latest_admin_announcement')
+    if (error) return
+    setLatestAnnouncement((data?.[0] as AdminAnnouncement | undefined) ?? null)
+  }
+
+  async function publishAnnouncement(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase || !currentIsAdmin || announcementSaving) return
+    const body = announcementDraft.trim()
+    if (!body) {
+      setAnnouncementError('Напишите текст оповещения.')
+      return
+    }
+    setAnnouncementSaving(true)
+    setAnnouncementError('')
+    const { error } = await supabase.rpc('create_admin_announcement', { p_body: body })
+    setAnnouncementSaving(false)
+    if (error) {
+      setAnnouncementError(`Не удалось опубликовать: ${error.message}`)
+      return
+    }
+    setAnnouncementDraft('')
+    await loadLatestAnnouncement()
+  }
+
   async function searchAdminUsers(event: FormEvent) {
     event.preventDefault()
     if (!supabase || !currentIsAdmin) return
@@ -995,6 +1141,35 @@ export default function App() {
     if (messageHoldTimerRef.current !== null) window.clearTimeout(messageHoldTimerRef.current)
     messageHoldTimerRef.current = null
   }
+
+  useEffect(() => {
+    document.querySelectorAll<HTMLAudioElement>('.voice-message audio').forEach((audio) => {
+      if (audio.parentElement?.querySelector('.voice-player-dom')) return
+      audio.controls = false
+      const player = document.createElement('div')
+      player.className = 'voice-player-dom'
+      const play = document.createElement('button')
+      play.type = 'button'
+      play.className = 'voice-play'
+      play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>'
+      const range = document.createElement('input')
+      range.type = 'range'
+      range.min = '0'
+      range.max = '1'
+      range.step = '0.01'
+      range.value = '0'
+      range.className = 'voice-progress'
+      const time = document.createElement('span')
+      time.className = 'voice-time'
+      time.textContent = '0:00'
+      play.onclick = () => { if (audio.paused) { void audio.play(); play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3v14H7zm7 0h3v14h-3z" fill="currentColor"/></svg>' } else { audio.pause(); play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>' } }
+      audio.ontimeupdate = () => { range.value = audio.duration ? String(audio.currentTime / audio.duration) : '0'; time.textContent = `${Math.floor(audio.currentTime / 60)}:${String(Math.floor(audio.currentTime % 60)).padStart(2, '0')}` }
+      audio.onended = () => { play.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></svg>' }
+      range.oninput = () => { audio.currentTime = Number(range.value) * (audio.duration || 1) }
+      player.append(play, range, time)
+      audio.parentElement?.append(player)
+    })
+  })
 
   function openMessageMenu(message: Message, x: number, y: number) {
     clearMessageHold()
@@ -1085,6 +1260,29 @@ export default function App() {
     setMessageMenu(null)
   }
 
+  async function downloadVoiceMessage(message: Message) {
+    const url = messageImageUrls[message.id]
+    if (!url) return
+    const sender = message.sender_id === currentUserId ? currentDisplayName || currentUsername : selectedChat?.display_name || selectedChat?.username || 'Osirium'
+    const extension = message.audio_name?.split('.').pop()?.toLowerCase() || 'webm'
+    const filename = `${sender.replace(/[^\p{L}\p{N}_-]+/gu, '_') || 'Osirium'} - голосовое.${extension}`
+    try {
+      const response = await fetch(url)
+      if (!response.ok) throw new Error('download failed')
+      const blobUrl = URL.createObjectURL(await response.blob())
+      const link = document.createElement('a')
+      link.href = blobUrl
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+    } catch {
+      setChatError('Не удалось скачать голосовое.')
+    }
+    setMessageMenu(null)
+  }
+
   function beginReply(message: Message) {
     setEditingMessage(null)
     setReplyingTo(message)
@@ -1141,6 +1339,10 @@ export default function App() {
     event.preventDefault()
     const body = draft.trim()
     if (!body || !selectedConversation || sending || !currentUserId) return
+    setSendAnimating(true)
+    window.setTimeout(() => setSendAnimating(false), 420)
+    setSendAnimating(true)
+    window.setTimeout(() => setSendAnimating(false), 420)
     if (editingMessage && selectedConversation !== favoritesConversationId && supabase) {
       setSending(true)
       const { error } = await supabase.rpc('edit_direct_message', { p_message_id: editingMessage.id, p_body: body })
@@ -1157,6 +1359,7 @@ export default function App() {
     }
     if (selectedConversation === favoritesConversationId) {
       const message: Message = { id: crypto.randomUUID(), sender_id: currentUserId, body, created_at: new Date().toISOString(), read_at: new Date().toISOString(), image_path: null, image_name: null, audio_path: null, audio_name: null, audio_duration: null }
+      scrollToLatestMessageRef.current = true
       setMessages((current) => {
         const next = [...current, message]
         window.localStorage.setItem(favoritesStorageKey(currentUserId), JSON.stringify(next))
@@ -1184,6 +1387,7 @@ export default function App() {
     }
 
     const message = data[0] as Message
+    scrollToLatestMessageRef.current = true
     setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message])
     setChats((current) => current.map((item) => item.conversation_id === selectedConversation
       ? { ...item, last_body: message.body, last_created_at: message.created_at, last_sender_id: message.sender_id }
@@ -1310,14 +1514,14 @@ export default function App() {
       setStoryError(`Не удалось загрузить историю: ${uploadError.message}`)
       return
     }
-    const { error: insertError } = await supabase.from('stories').insert({
+    const { data: createdStory, error: insertError } = await supabase.from('stories').insert({
       user_id: currentUserId,
       media_path: path,
       media_type: mediaType,
       overlay_text: storyOverlayText.trim() || null,
       description: storyDescription.trim() || null,
       aspect_ratio: storyAspectRatio,
-    })
+    }).select('id').single()
     setStoryUploading(false)
     if (insertError) {
       await supabase.storage.from('stories').remove([path])
@@ -1329,6 +1533,7 @@ export default function App() {
     setStoryPreviewUrl(null)
     setStoryOverlayText('')
     setStoryDescription('')
+    if (createdStory?.id) notifyStoryPublished(createdStory.id as string)
     await loadStories()
   }
 
@@ -1375,6 +1580,7 @@ export default function App() {
       return
     }
     setStoryReaction(nextReaction)
+    if (nextReaction === 'heart') notifyStoryReaction(openedStory.story_id)
   }
 
   async function replyToStory(event: FormEvent) {
@@ -1970,6 +2176,18 @@ export default function App() {
       </nav>
     </aside>
 
+    {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <section className="admin-announcement-float">
+      <p className="eyebrow">ОПОВЕЩЕНИЯ</p>
+      <h3>От имени Osirium</h3>
+      <form className="announcement-form" onSubmit={publishAnnouncement}>
+        <textarea value={announcementDraft} onChange={(event) => setAnnouncementDraft(event.target.value.slice(0, 500))} maxLength={500} placeholder="Например: сегодня технические работы..." />
+        <div className="announcement-form-footer"><small>{announcementDraft.length}/500</small><button className="privacy-save" disabled={announcementSaving}>{announcementSaving ? 'Публикуем...' : 'Опубликовать'}</button></div>
+      </form>
+      {announcementError && <p className="privacy-error">{announcementError}</p>}
+    </section>}
+
+    {latestAnnouncement && activeNav === 'Чаты' && !selectedChat && <section className="admin-announcement-banner" aria-label="Оповещение Osirium"><strong>Osirium</strong><p>{latestAnnouncement.body}</p><time>{new Date(latestAnnouncement.created_at).toLocaleDateString('ru-RU')}</time></section>}
+
     {!selectedProfile && activeNav === 'Профиль' && <div className="page-view settings-view profile-hub"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К профилю</button>{settingsSection === 'Профиль' && <><p className="eyebrow">АККАУНТ</p><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()}>{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'Настроить фото'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} /></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Оси' && <><p className="eyebrow">ВАЛЮТА</p><h2>Оси</h2><div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Ваш баланс</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><p className="eyebrow">АККАУНТ</p><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Отдельный код только для этого браузера. Он не меняет пароль аккаунта.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6 цифр" /></label><label>Повторите код<input type="password" inputMode="numeric" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : 'Сохранить'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}</div>}
     {!selectedProfile && activeNav === 'Профиль' && settingsSection === 'Истории' && <div className="page-view settings-view story-settings-page profile-story-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К профилю</button><p className="eyebrow">ИСТОРИИ</p><h2>Поделиться историей</h2><p className="settings-description">Истории видят только люди, с которыми у вас уже есть диалог. Через 24 часа они исчезают.</p><form className="story-form" onSubmit={publishStory}><input ref={storyInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" onChange={handleStorySelection} /><button type="button" className="story-add" onClick={() => storyInputRef.current?.click()}>Добавить историю</button><label>Размер<select value={storyAspectRatio} onChange={(event) => setStoryAspectRatio(event.target.value)}><option value="9:16">Вертикальный · 9:16</option><option value="1:1">Квадрат · 1:1</option><option value="16:9">Горизонтальный · 16:9</option></select></label>{storyPreviewUrl && <div className={`story-preview ratio-${storyAspectRatio.replace(':', '-')}`}>{storyFile?.type.startsWith('video/') ? <video src={storyPreviewUrl} controls /> : <img src={storyPreviewUrl} alt="Предпросмотр истории" />}{storyOverlayText && <strong>{storyOverlayText}</strong>}</div>}<label>Надпись на истории<input value={storyOverlayText} onChange={(event) => setStoryOverlayText(event.target.value.slice(0, 80))} maxLength={80} placeholder="Например, доброе утро" /></label><label>Описание<textarea value={storyDescription} onChange={(event) => setStoryDescription(event.target.value.slice(0, 180))} maxLength={180} placeholder="Описание истории" /></label><button className="story-publish" disabled={!storyFile || storyUploading}>{storyUploading ? 'Публикуем…' : 'Опубликовать'}</button>{storyError && <p className="privacy-error">{storyError}</p>}</form></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && currentIsAdmin && <div className="page-view settings-view admin-page"><p className="eyebrow">АДМИНИСТРАТОР</p><h2>Бейджи пользователей</h2><p className="settings-description">Выдавайте роли людям. Белый бейдж администратора назначается только системой и виден только у вас.</p><form className="admin-search-form" onSubmit={searchAdminUsers}><input value={adminSearch} onChange={(event) => setAdminSearch(event.target.value)} placeholder="Найти по username" /><button className="privacy-save" disabled={adminLoading}>{adminLoading ? 'Ищем…' : 'Найти'}</button></form>{adminError && <p className="privacy-error">{adminError}</p>}<div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={profile.id}><span className="avatar" style={{ backgroundColor: profile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(profile.avatar_path) ? <img src={profileAvatarUrl(profile.avatar_path) as string} alt="" /> : initials(profile.display_name || profile.username)}</span><div><strong>{profile.display_name || `@${profile.username}`}<RoleBadge isAdmin={profile.is_admin} badge={profile.badge} /></strong><small>@{profile.username}</small></div><div className="admin-badge-actions"><button className="badge-helper" onClick={() => { void assignBadge(profile, 'helper') }}>Хелпер</button><button className="badge-idea" onClick={() => { void assignBadge(profile, 'idea') }}>Идейник</button><button className="badge-clear" onClick={() => { void assignBadge(profile, null) }}>Снять</button></div></div>)}</div></div>}
@@ -2009,5 +2227,6 @@ export default function App() {
     {openedStory && storyUrls[openedStory.story_id] && <div className="story-viewer" role="dialog" aria-modal="true" onClick={() => setOpenedStory(null)}><div className={`story-viewer-media ratio-${openedStory.aspect_ratio.replace(':', '-')}`} onClick={(event) => event.stopPropagation()}>{openedStory.media_type === 'video' ? <video className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} controls autoPlay onCanPlay={() => setStoryMediaLoaded(true)} /> : <img className={`story-media ${storyMediaLoaded ? 'is-loaded' : ''}`} src={storyUrls[openedStory.story_id]} alt="История" onLoad={() => setStoryMediaLoaded(true)} />}{previousStory && <button type="button" className="story-step story-step-previous" aria-label="Предыдущая история" onClick={() => { void openStory(previousStory) }}><ArrowRightIcon /></button>}{nextStory && <button type="button" className="story-step story-step-next" aria-label="Следующая история" onClick={() => { void openStory(nextStory) }}><ArrowRightIcon /></button>}{openedStory.user_id === currentUserId && <button type="button" className="story-viewers-toggle" onClick={() => { setStoryViewersOpen((value) => !value); if (!storyViewersOpen) void loadStoryViewers(openedStory.story_id) }}>Зрители{storyViewers.length ? ` · ${storyViewers.length}` : ''}</button>}<div className="story-viewer-copy"><strong>{openedStory.overlay_text}</strong><p>{openedStory.description}</p></div>{openedStory.user_id !== currentUserId && <form className="story-reply" onSubmit={replyToStory}><input value={storyReply} onChange={(event) => setStoryReply(event.target.value.slice(0, 500))} placeholder="Написать сообщение" maxLength={500} /><button type="button" className={`story-reaction ${storyReaction ? 'active' : ''}`} aria-label="Поставить реакцию" onClick={() => { void reactToStory() }}><img src="/story-reaction.png" alt="" /></button><button className="story-reply-send" disabled={storyReplying || !storyReply.trim()} aria-label="Отправить ответ"><ArrowRightIcon /></button></form>}{storyViewersOpen && openedStory.user_id === currentUserId && <div className="story-viewers"><strong>Зрители</strong>{storyViewerError && <small>{storyViewerError}</small>}{storyViewers.length ? storyViewers.map((viewer) => <div className="story-viewer-user" key={viewer.user_id}><span className="avatar" style={{ backgroundColor: viewer.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(viewer.avatar_path) ? <img src={profileAvatarUrl(viewer.avatar_path) as string} alt="" /> : initials(viewer.display_name || viewer.username)}</span><span>{viewer.display_name || `@${viewer.username}`}<small>Просмотрено в {formatTime(viewer.viewed_at)}</small></span>{viewer.reaction === 'heart' && <img src="/story-reaction.png" alt="Реакция" />}</div>) : <p>Пока никто не посмотрел.</p>}</div>}{storyViewerError && !storyViewersOpen && <span className="story-viewer-error">{storyViewerError}</span>}</div></div>}
     {selectedProfile && <form className="contact-sheet" onSubmit={saveContact}><span>КОНТАКТ</span><label>Как записать человека<input value={contactLabel} onChange={(event) => setContactLabel(event.target.value.slice(0, 48))} maxLength={48} placeholder="Имя контакта" /></label><button disabled={contactSaving}>{contactSaving ? 'Сохраняем…' : contacts[selectedProfile.id] ? 'Сохранить имя' : 'Добавить в контакты'}</button>{contactError && <small>{contactError}</small>}</form>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && currentIsAdmin && <div className="admin-audit-float"><p className="eyebrow">ЖУРНАЛ</p><h3>Действия администратора</h3><div className="admin-audit-list">{adminAudit.length ? adminAudit.map((entry) => <div className="admin-audit-row" key={entry.id}><div><strong>{entry.action === 'badge' ? 'Бейдж' : entry.action === 'ban' ? 'Блокировка' : 'Выдача Оси'} · @{entry.username}</strong><small>{formatTime(entry.created_at)}{entry.undone_at ? ' · отменено' : ''}</small></div>{!entry.undone_at && <button type="button" onClick={() => { void undoAdminAudit(entry) }}>Отменить</button>}</div>) : <p className="list-note">Действий пока нет.</p>}</div></div>}
+    {messageMenu?.message.audio_path && messageMenu.mode === 'actions' && <button type="button" className="voice-download-menu" style={{ left: messageMenu.x, top: messageMenu.y + 205 }} onClick={() => { void downloadVoiceMessage(messageMenu.message) }}>Скачать голосовое</button>}
   </main>
 }

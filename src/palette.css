@@ -1,5 +1,10 @@
 /* Monochrome accent: charcoal surfaces and clean white interaction states. */
 html,body{background:#0d0d0d!important}.app-shell{width:100vw!important;margin:0!important;background:#151515!important}.sidebar,.conversation-head{background:#191919!important;border-color:#303030!important}.composer{height:58px!important;align-items:center!important;padding:0 14px!important;margin:0 18px 10px!important;transform:none!important;background:#242424!important;border:1px solid #343434!important;border-radius:22px!important}.conversation{background:#121212!important}.messages,.page-view{background:#121212!important;background-image:none!important}.search,.bubble,.settings-card,.contact-card{background:#242424!important;border-color:#343434!important}.composer input{background:transparent!important;border-color:transparent!important}.welcome-overlay{background:#0d0d0d!important}.welcome-card{background:#1a1a1a!important;border-color:#383838!important}.date-label{background:#292929!important;border-color:#383838!important}.sidebar-note{color:#bdbdbd!important}
+.messages .bubble-wrap{margin-bottom:5px!important}
+.pinned-message{margin-bottom:8px!important;overflow:visible!important}
+.message-menu-layer{z-index:200!important}.message-menu{z-index:201!important;background:#202020!important;opacity:1!important}
+.voice-player-dom .voice-play svg{width:14px;height:14px;display:block}
+.voice-download-menu{z-index:202!important;background:#202020!important;color:#f1f1f1!important}
 .brand-mark,.welcome-logo,.send,.page-action,.welcome-card button{background:#f3f5f3!important;color:#151515!important;border-color:#ffffff66!important}.welcome-logo span{color:#151515}.send:hover,.page-action:hover,.welcome-card button:hover{background:#ffffff!important}.bottom-nav .active{color:#ffffff!important;background:#ffffff12!important}.chat-row.selected{background:#ffffff12!important;border-color:#ffffff20!important}.chat-line b{background:#f3f5f3!important;color:#151515!important}.mine .bubble{background:#2a2a2a!important;border-color:#ffffff22!important}.avatar i{background:#f3f5f3!important}.eyebrow{color:#c5c5c5!important}.auth-form input:focus{border-color:#ffffff99!important}.auth-switch,.back{color:#eeeeee!important}.contact-card:hover{background:#ffffff10!important}.profile-avatar{background:#f3f5f3!important;color:#151515!important}.logout:hover{background:#ffffff12!important}.sidebar-note span,.conversation-head div span{color:#bcbcbc!important}
 /* Osirium app icon */
 .avatar{overflow:hidden}.avatar>img{width:100%;height:100%;object-fit:cover}
@@ -134,9 +139,66 @@ html[data-theme=light] .admin-search-form input{background:#fff!important;border
 html[data-theme=light] .admin-search-form input::placeholder{color:#777780!important}
 html[data-theme=light] .osi-amount-input{background:#fff!important;border-color:#d8d8dc!important;color:#171717!important}
 html[data-theme=light] .date-label{background:#fff!important;border-color:#d8d8dc!important;color:#55555d!important;box-shadow:0 3px 10px #17171708}
+.send.is-sending{animation:send-button-flight .42s cubic-bezier(.22,1,.36,1)}.send.is-sending svg{animation:send-arrow-flight .42s cubic-bezier(.22,1,.36,1)}.send.is-sending::before{content:"";position:absolute;z-index:-1;inset:8px;border-radius:inherit;background:#fff;opacity:0;animation:send-trail .42s ease-out}@keyframes send-button-flight{0%{transform:scale(1)}35%{transform:scale(.9) translateX(3px)}100%{transform:scale(1)}}@keyframes send-arrow-flight{0%{transform:translateX(0);opacity:1}45%{transform:translateX(8px);opacity:.25}70%{transform:translateX(-3px);opacity:.8}100%{transform:translateX(0);opacity:1}}@keyframes send-trail{0%{transform:translateX(-7px) scale(.7);opacity:0}45%{transform:translateX(5px) scale(1.2);opacity:.28}100%{transform:translateX(14px) scale(.7);opacity:0}}
+.bubble-wrap.message-reacted{position:relative}.bubble-wrap.message-reacted::after{content:"♥";position:absolute;right:7px;bottom:-7px;display:grid;width:21px;height:21px;place-items:center;border:2px solid #121212;border-radius:50%;background:#f5f5f5;color:#6f3ac2;font-size:11px;line-height:1;box-shadow:0 3px 9px #0004}.bubble-wrap:not(.mine).message-reacted::after{right:auto;left:7px}html[data-theme=light] .bubble-wrap.message-reacted::after{border-color:#f4f4f4;background:#fff;color:#6f3ac2}
 html[data-theme=light] .local-password-page{background:#f4f4f4!important;color:#171717!important}
 html[data-theme=light] .local-password-page h2,html[data-theme=light] .local-password-page h3{color:#171717!important}
 html[data-theme=light] .local-password-page .settings-description,html[data-theme=light] .local-password-page .privacy-section>p:not(.eyebrow){color:#68686f!important}
 html[data-theme=light] .local-password-entry{background:#fff!important;border-color:#dedee2!important;color:#24242a!important;box-shadow:0 4px 14px #17171708}
 html[data-theme=light] .local-password-entry small{color:#68686f!important}
 html[data-theme=light] .local-password-entry:hover{background:#fff!important;border-color:#c9c9cf!important}
+.voice-message audio{display:none}.voice-player-dom{display:flex;align-items:center;gap:9px;width:100%;height:36px;padding:4px 7px;border:1px solid #ffffff22;border-radius:18px;background:#303030}.voice-player-dom .voice-play{display:grid;place-items:center;width:27px;height:27px;padding:0;border:0;border-radius:50%;background:#f4f4f4;color:#151515;font-size:11px;cursor:pointer}.voice-player-dom .voice-progress{min-width:0;flex:1;height:4px;accent-color:#f4f4f4;cursor:pointer}.voice-player-dom .voice-time{min-width:34px;color:#d5d5d5;font-size:10px;text-align:right}
+.voice-download-menu{position:fixed;z-index:60;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font:600 12px Manrope,Arial,sans-serif;cursor:pointer}
+.admin-announcement-float {
+  position: fixed;
+  z-index: 30;
+  top: 236px;
+  right: auto;
+  left: calc(clamp(320px, 30vw, 380px) + 48px);
+  width: min(580px, calc(100vw - clamp(320px, 30vw, 380px) - 96px));
+  padding: 20px;
+  border: 1px solid #ffffff18;
+  border-radius: 20px;
+  background: #1b1b1b;
+  color: #f4f4f4;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 24%);
+}
+
+.admin-announcement-float h3 { margin: 0 0 14px; }
+.announcement-form textarea { box-sizing: border-box; display: block; width: 100%; min-height: 116px; padding: 13px 14px; resize: vertical; border: 1px solid #ffffff22; border-radius: 14px; outline: none; background: #242424; color: #f4f4f4; font: 500 13px/1.45 Manrope,Arial,sans-serif; }
+.announcement-form textarea:focus { border-color: #ffffff66; }
+.announcement-form-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.announcement-form-footer small { color: #a7a7a7; }
+.admin-announcement-banner {
+  position: fixed;
+  z-index: 25;
+  top: 18px;
+  left: min(430px, 32vw);
+  width: min(520px, calc(100vw - 48px));
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: 0 12px 35px rgb(0 0 0 / 18%);
+}
+.admin-announcement-banner strong { display: block; }
+.admin-announcement-banner p { margin: 4px 0; }
+.admin-announcement-banner time { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 720px) {
+  .admin-announcement-float { top: 226px; right: auto; left: 56px; width: calc(100vw - 112px); }
+  .admin-announcement-banner { top: 76px; left: 12px; width: calc(100vw - 24px); }
+}
+
+html[data-theme=light] .admin-announcement-float { border-color: #d8d8dc; background: #ffffff; color: #171717; box-shadow: 0 14px 36px rgb(30 30 35 / 12%); }
+html[data-theme=light] .announcement-form textarea { border-color: #d8d8dc; background: #f7f7f8; color: #171717; }
+html[data-theme=light] .announcement-form textarea:focus { border-color: #9b9ba3; }
+html[data-theme=light] .announcement-form-footer small { color: #707078; }
+
+@media (max-width: 520px) {
+  .admin-announcement-float { left: 20px; width: calc(100vw - 40px); }
+}
+
+.voice-download-menu{z-index:202!important;width:210px;min-height:42px;padding:11px 12px;border:1px solid #464646!important;border-radius:0 0 17px 17px!important;background:#202020!important;color:#f1f1f1!important;box-shadow:0 18px 45px #00000085;font:600 12px Manrope,Arial,sans-serif;text-align:left;cursor:pointer}.voice-download-menu:hover{background:#ffffff12!important}
+
+@media (max-width:720px){.app-shell:has(.admin-page) .admin-page{padding-bottom:366px!important}.admin-announcement-float{top:298px!important}.voice-download-menu{width:226px}}
