@@ -460,6 +460,7 @@ export default function App() {
   const [storyArchive, setStoryArchive] = useState<Story[]>([])
   const [storyArchiveLoading, setStoryArchiveLoading] = useState(false)
   const [storyArchiveError, setStoryArchiveError] = useState('')
+  const [archiveStoryMenu, setArchiveStoryMenu] = useState<{ story: Story; x: number; y: number } | null>(null)
   const [messageImageUrls, setMessageImageUrls] = useState<Record<string, string>>({})
   const [loadedMessageImages, setLoadedMessageImages] = useState<Record<string, boolean>>({})
   const [openedImage, setOpenedImage] = useState<{ src: string; name: string } | null>(null)
@@ -520,6 +521,8 @@ export default function App() {
   }, [])
   const messageHoldTimerRef = useRef<number | null>(null)
   const chatHoldTimerRef = useRef<number | null>(null)
+  const archiveStoryHoldTimerRef = useRef<number | null>(null)
+  const archiveStoryHoldOpenedRef = useRef(false)
   const scrollToLatestMessageRef = useRef(false)
 
   const favoriteChat: Chat | null = currentUserId ? { id: currentUserId, username: 'избранное', display_name: 'Избранное', avatar_color: '#376eb3', avatar_path: null, is_admin: false, badge: null, is_banned: false, last_seen_at: new Date().toISOString(), conversation_id: favoritesConversationId, last_body: 'Локальное облако заметок', last_created_at: null, last_sender_id: currentUserId, is_pinned: true, is_muted: false, is_blocked: false, block_hidden: false, blocked_by_other: false, hidden_presence_since: null } : null
@@ -529,6 +532,7 @@ export default function App() {
     : messages
   const navIndex = ['Чаты', 'Профиль', 'Настройки'].indexOf(activeNav)
   function selectNavLabel(label: string) {
+    if (label === activeNav) return
     setSelectedProfile(null)
     setActiveNav(label)
     if (label === 'Настройки') setMobileSettingsOpen(false)
@@ -812,6 +816,44 @@ export default function App() {
     const { data: signed } = await supabase.storage.from('stories').createSignedUrls(records.map((story) => story.media_path), 3600)
     setStoryUrls((current) => ({ ...current, ...Object.fromEntries(records.map((story) => [story.story_id, signed?.find((item) => item.path === story.media_path)?.signedUrl]).filter((item): item is [string, string] => Boolean(item[1]))) }))
   }, [])
+
+  function clearArchiveStoryHold() {
+    if (archiveStoryHoldTimerRef.current !== null) window.clearTimeout(archiveStoryHoldTimerRef.current)
+    archiveStoryHoldTimerRef.current = null
+  }
+
+  function openArchiveStoryMenu(story: Story, x: number, y: number) {
+    clearArchiveStoryHold()
+    triggerHaptic(24)
+    setArchiveStoryMenu({ story, x: Math.min(Math.max(14, x), window.innerWidth - 230), y: Math.min(Math.max(14, y - 24), window.innerHeight - 120) })
+  }
+
+  function startArchiveStoryHold(story: Story, x: number, y: number) {
+    clearArchiveStoryHold()
+    archiveStoryHoldOpenedRef.current = false
+    archiveStoryHoldTimerRef.current = window.setTimeout(() => {
+      archiveStoryHoldOpenedRef.current = true
+      openArchiveStoryMenu(story, x, y)
+    }, 550)
+  }
+
+  async function deleteArchiveStory(story: Story) {
+    if (!supabase) return
+    setArchiveStoryMenu(null)
+    const { error } = await supabase.from('stories').delete().eq('id', story.story_id)
+    if (error) {
+      setStoryArchiveError('Не удалось удалить историю из архива.')
+      return
+    }
+    await supabase.storage.from('stories').remove([story.media_path])
+    setStoryArchive((current) => current.filter((item) => item.story_id !== story.story_id))
+    setStories((current) => current.filter((item) => item.story_id !== story.story_id))
+    setStoryUrls((current) => {
+      const next = { ...current }
+      delete next[story.story_id]
+      return next
+    })
+  }
 
   useEffect(() => {
     const messagesRoot = document.querySelector('.messages')
@@ -2629,8 +2671,8 @@ export default function App() {
       <p className="eyebrow">ИСТОРИИ</p>
       <h2>Истории</h2>
       <div className="story-section-tabs" role="tablist" aria-label="Разделы историй">
-        <button type="button" className={storySection === 'publish' ? 'active' : ''} onClick={() => setStorySection('publish')}>Выложить</button>
-        <button type="button" className={storySection === 'archive' ? 'active' : ''} onClick={() => { setStorySection('archive'); void loadStoryArchive() }}>Архив историй</button>
+        <button type="button" className={storySection === 'publish' ? 'active' : ''} disabled={storySection === 'publish'} onClick={() => setStorySection('publish')}>Выложить</button>
+        <button type="button" className={storySection === 'archive' ? 'active' : ''} disabled={storySection === 'archive'} onClick={() => { setStorySection('archive'); void loadStoryArchive() }}>Архив историй</button>
       </div>
       {storySection === 'publish' ? <>
         <h3 className="story-section-title">Поделиться историей</h3>
@@ -2650,10 +2692,11 @@ export default function App() {
         {storyArchiveLoading && <p className="list-note">Загружаем архив…</p>}
         {storyArchiveError && <p className="privacy-error">{storyArchiveError}</p>}
         {!storyArchiveLoading && !storyArchiveError && !storyArchive.length && <p className="list-note">В архиве пока нет историй.</p>}
-        <div className="story-archive-grid">{storyArchive.map((story) => <button type="button" key={story.story_id} className="story-archive-card" onClick={() => { void openStory(story) }}>
+        <div className="story-archive-grid">{storyArchive.map((story) => <button type="button" key={story.story_id} className="story-archive-card" onClick={() => { if (archiveStoryHoldOpenedRef.current) { archiveStoryHoldOpenedRef.current = false; return }; void openStory(story) }} onContextMenu={(event) => { event.preventDefault(); openArchiveStoryMenu(story, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startArchiveStoryHold(story, touch.clientX, touch.clientY) }} onTouchMove={clearArchiveStoryHold} onTouchEnd={clearArchiveStoryHold} onTouchCancel={clearArchiveStoryHold}>
           {storyUrls[story.story_id] ? story.media_type === 'video' ? <video src={storyUrls[story.story_id]} muted /> : <img src={storyUrls[story.story_id]} alt="История из архива" /> : <span>Загрузка…</span>}
           <small>{new Date(story.created_at).toLocaleDateString('ru-RU')}</small>
         </button>)}</div>
+        {archiveStoryMenu && <div className="message-menu-layer" onClick={() => setArchiveStoryMenu(null)}><div className="message-menu" style={{ left: archiveStoryMenu.x, top: archiveStoryMenu.y }} onClick={(event) => event.stopPropagation()}><button className="message-menu-danger" onClick={() => { void deleteArchiveStory(archiveStoryMenu.story) }}>Удалить из архива</button></div></div>}
       </section>}
     </div>
   )
