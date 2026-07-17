@@ -1,6 +1,7 @@
 /* Monochrome accent: charcoal surfaces and clean white interaction states. */
 html,body{background:#0d0d0d!important}.app-shell{width:100vw!important;margin:0!important;background:#151515!important}.sidebar,.conversation-head{background:#191919!important;border-color:#303030!important}.composer{height:58px!important;align-items:center!important;padding:0 14px!important;margin:0 18px 10px!important;transform:none!important;background:#242424!important;border:1px solid #343434!important;border-radius:22px!important}.conversation{background:#121212!important}.messages,.page-view{background:#121212!important;background-image:none!important}.search,.bubble,.settings-card,.contact-card{background:#242424!important;border-color:#343434!important}.composer input{background:transparent!important;border-color:transparent!important}.welcome-overlay{background:#0d0d0d!important}.welcome-card{background:#1a1a1a!important;border-color:#383838!important}.date-label{background:#292929!important;border-color:#383838!important}.sidebar-note{color:#bdbdbd!important}
 .messages .bubble-wrap{margin-bottom:5px!important}
+.chat-row,.chat-row *,.bubble-wrap,.bubble-wrap *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .pinned-message{margin-bottom:8px!important;overflow:visible!important}
 .message-menu-layer{z-index:200!important}.message-menu{z-index:201!important;background:#202020!important;opacity:1!important}
 .voice-player-dom .voice-play svg{width:14px;height:14px;display:block}
