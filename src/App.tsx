@@ -31,6 +31,10 @@ import {
 import { type Session } from '@supabase/supabase-js'
 import { hasSupabase, supabase } from './supabase'
 
+function triggerHaptic(pattern: number | number[] = 8) {
+  if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(pattern)
+}
+
 type Profile = {
   id: string
   username: string
@@ -781,6 +785,14 @@ export default function App() {
   }, [sendAnimating])
 
   useEffect(() => {
+    const handlePress = (event: PointerEvent) => {
+      if ((event.target as HTMLElement | null)?.closest('button, [role="button"]')) triggerHaptic(8)
+    }
+    document.addEventListener('pointerdown', handlePress)
+    return () => document.removeEventListener('pointerdown', handlePress)
+  }, [])
+
+  useEffect(() => {
     const messagesRoot = document.querySelector('.messages')
     if (!messagesRoot) return
     const handleDoubleClick = (event: Event) => {
@@ -1291,6 +1303,7 @@ export default function App() {
 
   function openMessageMenu(message: Message, x: number, y: number) {
     clearMessageHold()
+    triggerHaptic(24)
     setMessageMenu({ message, x: Math.min(Math.max(14, x), window.innerWidth - 230), y: Math.min(Math.max(14, y - 24), Math.max(14, window.innerHeight - 310)), mode: 'actions' })
   }
 
@@ -1307,6 +1320,7 @@ export default function App() {
   function openChatMenu(chat: Chat, x: number, y: number) {
     if (chat.conversation_id === favoritesConversationId) return
     clearChatHold()
+    triggerHaptic(24)
     setChatMenu({ chat, x: Math.min(Math.max(14, x), window.innerWidth - 236), y: Math.min(Math.max(14, y), window.innerHeight - 220), mode: 'actions' })
   }
 
@@ -1455,6 +1469,7 @@ export default function App() {
     event.preventDefault()
     const body = draft.trim()
     if (!body || !selectedConversation || sending || !currentUserId) return
+    triggerHaptic([10, 26, 14])
     setSendAnimating(true)
     window.setTimeout(() => setSendAnimating(false), 420)
     setSendAnimating(true)
