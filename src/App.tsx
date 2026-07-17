@@ -535,6 +535,7 @@ export default function App() {
     if (label === activeNav) return
     setSelectedProfile(null)
     setActiveNav(label)
+    if (label === 'Профиль') setSettingsSection('Профиль')
     if (label === 'Настройки') setMobileSettingsOpen(false)
   }
   const query = search.trim().toLowerCase()
@@ -1023,10 +1024,6 @@ export default function App() {
     window.addEventListener('pagehide', persistLock)
     return () => window.removeEventListener('pagehide', persistLock)
   }, [appLocked, currentUserId])
-
-  useEffect(() => {
-    if (activeNav === 'Профиль') setSettingsSection('Профиль')
-  }, [activeNav])
 
   useEffect(() => {
     if (activeNav === 'Настройки' && ['Профиль', 'Оси', 'Конфиденциальность', 'Истории'].includes(settingsSection)) setSettingsSection('Уведомления')
@@ -2705,7 +2702,7 @@ export default function App() {
     <button key={chat.conversation_id} onClick={() => { void selectChat(chat) }} onContextMenu={(event) => { event.preventDefault(); openChatMenu(chat, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startChatHold(chat, touch.clientX, touch.clientY) }} onTouchMove={clearChatHold} onTouchEnd={clearChatHold} onTouchCancel={clearChatHold} className={`chat-row ${chat.conversation_id === selectedConversation ? 'selected' : ''} ${chat.is_pinned ? 'pinned' : ''}`}>
       <span className={`avatar ${chat.conversation_id === favoritesConversationId ? 'favorites-avatar' : ''}`} style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{chat.conversation_id === favoritesConversationId ? <StarIcon /> : profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(displayNameFor(chat))}</span>
       <span className="chat-copy">
-        <span className="chat-line"><strong>{displayNameFor(chat)}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}</time></span>
+        <span className="chat-line"><strong>{displayNameFor(chat)}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}{chat.is_pinned && <span className="chat-pin-indicator" aria-label="Чат закреплён"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l-1 5 3 3v2H6v-2l3-3-1-5Zm4 10v6" /></svg></span>}</time></span>
         <span className={`chat-line ${formatPresence(chat.hidden_presence_since || chat.last_seen_at, Boolean(chat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}`}><small>{formatPresence(chat.hidden_presence_since || chat.last_seen_at, Boolean(chat.hidden_presence_since))} · {formatPreview(chat.last_body)}</small></span>
       </span>
     </button>
