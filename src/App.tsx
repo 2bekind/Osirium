@@ -10,6 +10,7 @@ import {
   GroupIcon,
   LockIcon,
   Menu2Icon,
+  MaximizeIcon,
   MessageIcon,
   MicrophoneIcon,
   MicrophoneSlashIcon,
@@ -461,6 +462,8 @@ export default function App() {
   const [callSoundMuted, setCallSoundMuted] = useState(false)
   const [callScreenSharing, setCallScreenSharing] = useState(false)
   const [remoteScreenSharing, setRemoteScreenSharing] = useState(false)
+  const [screenShareView, setScreenShareView] = useState<'local' | 'remote'>('remote')
+  const [screenSharePromptOpen, setScreenSharePromptOpen] = useState(false)
   const callStreamRef = useRef<MediaStream | null>(null)
   const callPeerRef = useRef<RTCPeerConnection | null>(null)
   const callIdRef = useRef<string | null>(null)
@@ -470,7 +473,10 @@ export default function App() {
   const chatsRef = useRef<Chat[]>([])
   const callSignalHandlerRef = useRef<(signal: CallSignal) => void>(() => undefined)
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
+  const remoteAudioStreamRef = useRef<MediaStream | null>(null)
   const remoteScreenVideoRef = useRef<HTMLVideoElement | null>(null)
+  const localScreenVideoRef = useRef<HTMLVideoElement | null>(null)
+  const screenShareStageRef = useRef<HTMLDivElement | null>(null)
   const callRingtoneAudioRef = useRef<HTMLAudioElement | null>(null)
   const callMicrophoneMuteAudioRef = useRef<HTMLAudioElement | null>(null)
   const callMicrophoneUnmuteAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -481,6 +487,7 @@ export default function App() {
   const callSoundMutedRef = useRef(false)
   const screenShareStreamRef = useRef<MediaStream | null>(null)
   const screenShareSenderRef = useRef<RTCRtpSender | null>(null)
+  const screenShareAudioSendersRef = useRef<RTCRtpSender[]>([])
   const photoInputRef = useRef<HTMLInputElement>(null)
   const voiceRecorderRef = useRef<MediaRecorder | null>(null)
   const voiceStreamRef = useRef<MediaStream | null>(null)
@@ -606,9 +613,47 @@ export default function App() {
     if (permission === 'granted') void syncPushSubscription('granted')
   }
 
+  const postServiceWorkerMessage = useCallback((message: Record<string, unknown>) => {
+    if (!('serviceWorker' in navigator)) return
+    const worker = navigator.serviceWorker.controller
+    if (worker) {
+      worker.postMessage(message)
+      return
+    }
+    void navigator.serviceWorker.ready.then((registration) => registration.active?.postMessage(message)).catch(() => undefined)
+  }, [])
+
+  const clearPushNotifications = useCallback((tags: string[]) => {
+    if (tags.length) postServiceWorkerMessage({ type: 'osirium-clear-notifications', tags })
+  }, [postServiceWorkerMessage])
+
   useEffect(() => {
     if (authenticated && notificationPermission === 'granted') void syncPushSubscription()
   }, [authenticated, currentUserId, notificationPermission, syncPushSubscription])
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return
+    const syncActiveConversation = () => {
+      const visible = authenticated && document.visibilityState === 'visible' && document.hasFocus()
+      const conversationId = visible && selectedConversation !== favoritesConversationId ? selectedConversation : null
+      postServiceWorkerMessage({ type: 'osirium-client-state', visible, conversationId })
+      if (conversationId) clearPushNotifications([`conversation-${conversationId}`])
+    }
+    const handleWorkerMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'osirium-request-active-conversation') syncActiveConversation()
+    }
+    syncActiveConversation()
+    window.addEventListener('focus', syncActiveConversation)
+    window.addEventListener('blur', syncActiveConversation)
+    document.addEventListener('visibilitychange', syncActiveConversation)
+    navigator.serviceWorker.addEventListener('message', handleWorkerMessage)
+    return () => {
+      window.removeEventListener('focus', syncActiveConversation)
+      window.removeEventListener('blur', syncActiveConversation)
+      document.removeEventListener('visibilitychange', syncActiveConversation)
+      navigator.serviceWorker.removeEventListener('message', handleWorkerMessage)
+    }
+  }, [authenticated, clearPushNotifications, postServiceWorkerMessage, selectedConversation])
 
   function notifyRecipient(message: Message) {
     if (!supabase || selectedConversation === favoritesConversationId) return
@@ -711,6 +756,7 @@ export default function App() {
     }
     if (!supabase) return
     await supabase.rpc('mark_direct_messages_read', { p_conversation_id: conversationId })
+    clearPushNotifications([`conversation-${conversationId}`])
     const { data, error } = await supabase.rpc('list_messages', { p_conversation_id: conversationId })
     if (error) {
       setChatError('Не удалось загрузить сообщения.')
@@ -721,7 +767,7 @@ export default function App() {
     setMessages(records)
     void loadImageUrls(records)
     void loadPinnedMessage(conversationId)
-  }, [loadImageUrls, loadPinnedMessage])
+  }, [clearPushNotifications, loadImageUrls, loadPinnedMessage])
 
   useEffect(() => {
     if (!sending && selectedConversation && !appLocked) {
@@ -949,6 +995,10 @@ export default function App() {
         if (container && container.scrollHeight - container.scrollTop - container.clientHeight < 180) scrollToLatestMessageRef.current = true
         if (!incomingBlocked) setMessages((current) => current.some((item) => item.id === message.id) ? current.map((item) => item.id === message.id ? { ...item, ...message } : item) : [...current, message])
         if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId) setChats((current) => current.map((chat) => chat.id === message.sender_id ? { ...chat, last_seen_at: new Date().toISOString(), hidden_presence_since: null } : chat))
+        if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId && !incomingBlocked) {
+          void client.rpc('mark_direct_messages_read', { p_conversation_id: selectedConversation })
+          clearPushNotifications([`conversation-${selectedConversation}`])
+        }
         if (payload.eventType === 'INSERT' && message.sender_id !== currentUserId && !selectedChat?.is_muted && !incomingBlocked) {
           const sound = notificationAudioRef.current
           if (sound) {
@@ -962,7 +1012,7 @@ export default function App() {
       .subscribe()
 
     return () => { void client.removeChannel(channel) }
-  }, [currentUserId, loadChats, loadImageUrls, selectedChat?.is_blocked, selectedChat?.is_muted, selectedConversation])
+  }, [clearPushNotifications, currentUserId, loadChats, loadImageUrls, selectedChat?.is_blocked, selectedChat?.is_muted, selectedConversation])
 
   useEffect(() => {
     if (!scrollToLatestMessageRef.current) return
@@ -2043,11 +2093,14 @@ export default function App() {
     })
     screenShareStreamRef.current = null
     screenShareSenderRef.current = null
+    screenShareAudioSendersRef.current = []
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null
       remoteAudioRef.current.muted = false
     }
+    remoteAudioStreamRef.current = null
     if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = null
+    if (localScreenVideoRef.current) localScreenVideoRef.current.srcObject = null
     if (callId) delete pendingCallIceCandidatesRef.current[callId]
     callIdRef.current = null
     queuedIceCandidatesRef.current = []
@@ -2058,6 +2111,8 @@ export default function App() {
     setCallSoundMuted(false)
     setCallScreenSharing(false)
     setRemoteScreenSharing(false)
+    setScreenShareView('remote')
+    setScreenSharePromptOpen(false)
   }
 
   function toggleCallMicrophone() {
@@ -2086,28 +2141,34 @@ export default function App() {
 
   async function stopScreenShare() {
     const sender = screenShareSenderRef.current
+    const audioSenders = screenShareAudioSendersRef.current
     const stream = screenShareStreamRef.current
-    if (!sender && !stream) return
+    if (!sender && !audioSenders.length && !stream) return
 
     screenShareSenderRef.current = null
+    screenShareAudioSendersRef.current = []
     screenShareStreamRef.current = null
     stream?.getTracks().forEach((track) => {
       track.onended = null
       track.stop()
     })
+    if (localScreenVideoRef.current) localScreenVideoRef.current.srcObject = null
     setCallScreenSharing(false)
+    setScreenShareView(remoteScreenSharing ? 'remote' : 'local')
 
     const peer = callPeerRef.current
     const target = callTarget
     const callId = callIdRef.current
-    if (!sender || !peer || !target || !callId) return
+    if (!peer || !target || !callId) return
     try {
-      peer.removeTrack(sender)
+      ;[sender, ...audioSenders].filter((item): item is RTCRtpSender => Boolean(item)).forEach((item) => {
+        if (peer.getSenders().includes(item)) peer.removeTrack(item)
+      })
       await renegotiateCall(peer, target, callId)
     } catch {}
   }
 
-  async function startScreenShare() {
+  async function startScreenShare(includeAudio: boolean) {
     const peer = callPeerRef.current
     const target = callTarget
     const callId = callIdRef.current
@@ -2115,8 +2176,9 @@ export default function App() {
 
     let stream: MediaStream | null = null
     let sender: RTCRtpSender | null = null
+    let audioSenders: RTCRtpSender[] = []
     try {
-      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { max: 30 } }, audio: false })
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { max: 30 } }, audio: includeAudio })
       if (callPeerRef.current !== peer) {
         stream.getTracks().forEach((track) => track.stop())
         return
@@ -2127,21 +2189,42 @@ export default function App() {
         return
       }
       sender = peer.addTrack(track, stream)
+      audioSenders = stream.getAudioTracks().map((audioTrack) => peer.addTrack(audioTrack, stream as MediaStream))
       screenShareStreamRef.current = stream
       screenShareSenderRef.current = sender
+      screenShareAudioSendersRef.current = audioSenders
+      if (localScreenVideoRef.current) localScreenVideoRef.current.srcObject = stream
       setCallScreenSharing(true)
+      setScreenShareView('local')
       track.onended = () => { void stopScreenShare() }
       await renegotiateCall(peer, target, callId)
     } catch {
-      if (sender && peer.getSenders().includes(sender)) peer.removeTrack(sender)
+      ;[sender, ...audioSenders].filter((item): item is RTCRtpSender => Boolean(item)).forEach((item) => {
+        if (peer.getSenders().includes(item)) peer.removeTrack(item)
+      })
       stream?.getTracks().forEach((track) => {
         track.onended = null
         track.stop()
       })
       screenShareStreamRef.current = null
       screenShareSenderRef.current = null
+      screenShareAudioSendersRef.current = []
+      if (localScreenVideoRef.current) localScreenVideoRef.current.srcObject = null
       setCallScreenSharing(false)
     }
+  }
+
+  async function openScreenShareFullscreen() {
+    const stage = screenShareStageRef.current
+    try {
+      if (stage?.requestFullscreen) {
+        await stage.requestFullscreen()
+        return
+      }
+    } catch {}
+    const activeVideo = screenShareView === 'local' ? localScreenVideoRef.current : remoteScreenVideoRef.current
+    const safariVideo = activeVideo as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null
+    safariVideo?.webkitEnterFullscreen?.()
   }
 
   function createCallPeer(target: Chat, callId: string) {
@@ -2153,16 +2236,28 @@ export default function App() {
       if (event.track.kind === 'video') {
         if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = event.streams[0] || new MediaStream([event.track])
         setRemoteScreenSharing(true)
-        event.track.onended = () => {
+        if (!screenShareStreamRef.current) setScreenShareView('remote')
+        const hideRemoteScreen = () => {
           if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = null
           setRemoteScreenSharing(false)
+          if (screenShareStreamRef.current) setScreenShareView('local')
         }
+        event.track.addEventListener('ended', hideRemoteScreen, { once: true })
+        event.track.addEventListener('mute', hideRemoteScreen)
+        event.track.addEventListener('unmute', () => {
+          if (remoteScreenVideoRef.current) remoteScreenVideoRef.current.srcObject = event.streams[0] || new MediaStream([event.track])
+          setRemoteScreenSharing(true)
+          if (!screenShareStreamRef.current) setScreenShareView('remote')
+        })
       } else if (remoteAudioRef.current) {
-        const stream = event.streams[0] || new MediaStream([event.track])
+        const stream = remoteAudioStreamRef.current || new MediaStream()
+        if (!stream.getTracks().some((track) => track.id === event.track.id)) stream.addTrack(event.track)
+        remoteAudioStreamRef.current = stream
         remoteAudioRef.current.muted = callSoundMutedRef.current
         remoteAudioRef.current.volume = 1
         remoteAudioRef.current.srcObject = stream
         void remoteAudioRef.current.play().catch(() => undefined)
+        event.track.addEventListener('ended', () => stream.removeTrack(event.track), { once: true })
       }
       setCallStatus('connected')
     }
@@ -2285,6 +2380,7 @@ export default function App() {
     const signal = incomingOfferRef.current
     const target = callTarget
     if (!signal || !target) return
+    clearPushNotifications([`call-${signal.call_id}`])
     stopIncomingRingtone()
     callMicrophoneMutedRef.current = false
     callSoundMutedRef.current = false
@@ -2320,6 +2416,7 @@ export default function App() {
 
   async function endCall(notify = true) {
     const callId = callIdRef.current || incomingOfferRef.current?.call_id
+    if (callId) clearPushNotifications([`call-${callId}`])
     if (notify && callTarget && callId) {
       try {
         await sendCallSignal(callTarget, callId, 'hangup')
@@ -2615,7 +2712,7 @@ export default function App() {
 
     <audio ref={remoteAudioRef} autoPlay playsInline />
     {callTarget && <div className="call-overlay" role="dialog" aria-modal="true" aria-label="Звонок">
-      <div className="call-card">
+      <div className={`call-card ${callScreenSharing || remoteScreenSharing ? 'has-screen-share' : ''}`}>
         <span className="avatar call-avatar" style={{ backgroundColor: callTarget.avatar_color || defaultAvatarColor }}>
           {profileAvatarUrl(callTarget.avatar_path) ? <img src={profileAvatarUrl(callTarget.avatar_path) as string} alt="" /> : initials(callTarget.display_name || callTarget.username)}
         </span>
@@ -2624,8 +2721,18 @@ export default function App() {
           {(callStatus === 'calling' || callStatus === 'incoming') && <span className="call-pulse" aria-hidden="true" />}
         </div>
         <p>{callStatus === 'incoming' ? 'Входящий звонок' : callStatus === 'connected' ? 'Вы разговариваете' : callStatus === 'calling' ? 'Соединение…' : callStatus === 'signal-error' ? 'Не удалось доставить звонок. Попробуйте ещё раз.' : 'Не удалось получить доступ к микрофону'}</p>
-        <div className={`remote-screen-preview ${remoteScreenSharing ? 'is-active' : ''}`}>
-          <video ref={remoteScreenVideoRef} autoPlay playsInline />
+        <div ref={screenShareStageRef} className={`remote-screen-preview ${callScreenSharing || remoteScreenSharing ? 'is-active' : ''}`}>
+          <div className="screen-share-toolbar">
+            <div className="screen-share-switcher">
+              {callScreenSharing && <button type="button" className={screenShareView === 'local' ? 'active' : ''} onClick={() => setScreenShareView('local')}>Ваша демонстрация</button>}
+              {remoteScreenSharing && <button type="button" className={screenShareView === 'remote' ? 'active' : ''} onClick={() => setScreenShareView('remote')}>{displayNameFor(callTarget)}</button>}
+            </div>
+            <button type="button" className="screen-share-fullscreen" aria-label="Открыть демонстрацию на весь экран" onClick={() => { void openScreenShareFullscreen() }}><MaximizeIcon /></button>
+          </div>
+          <div className="screen-share-canvas">
+            <video ref={localScreenVideoRef} className={screenShareView === 'local' && callScreenSharing ? 'is-visible' : ''} autoPlay playsInline muted />
+            <video ref={remoteScreenVideoRef} className={screenShareView === 'remote' && remoteScreenSharing ? 'is-visible' : ''} autoPlay playsInline muted />
+          </div>
         </div>
         {callStatus === 'incoming' && <div className="call-actions">
           <button type="button" className="call-accept" onClick={() => { void acceptCall() }}>Принять</button>
@@ -2638,12 +2745,23 @@ export default function App() {
           <button type="button" className={`call-control ${callSoundMuted ? 'is-muted' : ''}`} aria-label={callSoundMuted ? 'Включить звук собеседника' : 'Выключить звук собеседника'} aria-pressed={callSoundMuted} onClick={toggleCallSound}>
             {callSoundMuted ? <VolumeXIcon /> : <VolumeHighIcon />}
           </button>
-          <button type="button" className={`call-control call-screen-share ${callScreenSharing ? 'is-active' : ''}`} aria-label={callScreenSharing ? 'Остановить демонстрацию экрана' : 'Включить демонстрацию экрана'} aria-pressed={callScreenSharing} disabled={callStatus !== 'connected'} onClick={() => { void (callScreenSharing ? stopScreenShare() : startScreenShare()) }}>
+          <button type="button" className={`call-control call-screen-share ${callScreenSharing ? 'is-active' : ''}`} aria-label={callScreenSharing ? 'Остановить демонстрацию экрана' : 'Включить демонстрацию экрана'} aria-pressed={callScreenSharing} disabled={callStatus !== 'connected'} onClick={() => { if (callScreenSharing) void stopScreenShare(); else setScreenSharePromptOpen(true) }}>
             <MonitorIcon />
           </button>
         </div>}
         {callStatus !== 'incoming' && <button type="button" className="call-hangup" onClick={() => { void endCall() }}>Завершить звонок</button>}
         {callStatus !== 'incoming' && <small className="call-screen-share-note">В данный момент демонстрация экрана доступна только для ПК, телефоны не позволяют сделать демонстрацию экрана вне приложения.</small>}
+        {screenSharePromptOpen && <div className="screen-share-choice" role="dialog" aria-modal="true" aria-label="Передача звука демонстрации">
+          <section>
+            <strong>Передавать звук?</strong>
+            <p>Выберите, нужно ли собеседнику слышать звук выбранного экрана или вкладки.</p>
+            <div>
+              <button type="button" onClick={() => { setScreenSharePromptOpen(false); void startScreenShare(false) }}>Без звука</button>
+              <button type="button" className="primary" onClick={() => { setScreenSharePromptOpen(false); void startScreenShare(true) }}>Со звуком</button>
+            </div>
+            <button type="button" className="screen-share-choice-cancel" onClick={() => setScreenSharePromptOpen(false)}>Отмена</button>
+          </section>
+        </div>}
       </div>
     </div>}
 

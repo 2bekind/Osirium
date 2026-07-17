@@ -70,7 +70,7 @@ Deno.serve(async (request) => {
       const { data: caller } = await admin.from('profiles').select('display_name, username').eq('id', user.id).maybeSingle()
       const { data: subscriptions } = await admin.from('push_subscriptions').select('endpoint, p256dh, auth').eq('user_id', call.recipient_id)
       const callerName = caller?.display_name || caller?.username || 'Osirium'
-      const payload = JSON.stringify({ title: 'Osirium', body: `Вам звонит ${callerName}`, url: `/?call=${encodeURIComponent(callId)}`, tag: `call-${callId}`, renotify: true })
+      const payload = JSON.stringify({ title: 'Osirium', body: `Вам звонит ${callerName}`, url: `/?call=${encodeURIComponent(callId)}`, tag: `call-${callId}`, conversationId: call.conversation_id, renotify: true })
       webpush.setVapidDetails('mailto:push@osirium.lol', vapidPublicKey, vapidPrivateKey)
       let delivered = 0
       await Promise.all((subscriptions ?? []).map(async (subscription) => {
@@ -130,7 +130,7 @@ Deno.serve(async (request) => {
       if (!message || !reaction || message.sender_id === user.id) return response({ delivered: 0 })
       const { data: viewer } = await admin.from('profiles').select('display_name, username').eq('id', user.id).maybeSingle()
       const { data: subscriptions } = await admin.from('push_subscriptions').select('endpoint, user_id, p256dh, auth').eq('user_id', message.sender_id)
-      const payload = JSON.stringify({ title: viewer?.display_name || viewer?.username || 'Osirium', body: 'Поставил(а) реакцию на ваше сообщение', url: '/' })
+      const payload = JSON.stringify({ title: viewer?.display_name || viewer?.username || 'Osirium', body: 'Поставил(а) реакцию на ваше сообщение', url: `/?conversation=${encodeURIComponent(message.conversation_id)}`, tag: `conversation-${message.conversation_id}`, conversationId: message.conversation_id })
       webpush.setVapidDetails('mailto:push@osirium.lol', vapidPublicKey, vapidPrivateKey)
       let delivered = 0
       await Promise.all((subscriptions ?? []).map(async (subscription) => {
@@ -161,7 +161,9 @@ Deno.serve(async (request) => {
     const payload = JSON.stringify({
       title: sender?.display_name || sender?.username || 'Osirium',
       body: preview.slice(0, 160),
-      url: '/',
+      url: `/?conversation=${encodeURIComponent(message.conversation_id)}`,
+      tag: `conversation-${message.conversation_id}`,
+      conversationId: message.conversation_id,
     })
     webpush.setVapidDetails('mailto:push@osirium.lol', vapidPublicKey, vapidPrivateKey)
     let delivered = 0
