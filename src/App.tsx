@@ -456,6 +456,10 @@ export default function App() {
   const [storyAspectRatio, setStoryAspectRatio] = useState('9:16')
   const [storyUploading, setStoryUploading] = useState(false)
   const [storyError, setStoryError] = useState('')
+  const [storySection, setStorySection] = useState<'publish' | 'archive'>('publish')
+  const [storyArchive, setStoryArchive] = useState<Story[]>([])
+  const [storyArchiveLoading, setStoryArchiveLoading] = useState(false)
+  const [storyArchiveError, setStoryArchiveError] = useState('')
   const [messageImageUrls, setMessageImageUrls] = useState<Record<string, string>>({})
   const [loadedMessageImages, setLoadedMessageImages] = useState<Record<string, boolean>>({})
   const [openedImage, setOpenedImage] = useState<{ src: string; name: string } | null>(null)
@@ -790,6 +794,23 @@ export default function App() {
     }
     document.addEventListener('pointerdown', handlePress)
     return () => document.removeEventListener('pointerdown', handlePress)
+  }, [])
+
+  const loadStoryArchive = useCallback(async () => {
+    if (!supabase) return
+    setStoryArchiveLoading(true)
+    setStoryArchiveError('')
+    const { data, error } = await supabase.rpc('list_my_story_archive')
+    setStoryArchiveLoading(false)
+    if (error) {
+      setStoryArchiveError('Не удалось загрузить архив историй.')
+      return
+    }
+    const records = (data ?? []) as Story[]
+    setStoryArchive(records)
+    if (!records.length) return
+    const { data: signed } = await supabase.storage.from('stories').createSignedUrls(records.map((story) => story.media_path), 3600)
+    setStoryUrls((current) => ({ ...current, ...Object.fromEntries(records.map((story) => [story.story_id, signed?.find((item) => item.path === story.media_path)?.signedUrl]).filter((item): item is [string, string] => Boolean(item[1]))) }))
   }, [])
 
   useEffect(() => {
@@ -2602,6 +2623,41 @@ export default function App() {
     setShowWelcome(false)
   }
 
+  const renderProfileStoryPage = () => (
+    <div className="page-view settings-view story-settings-page profile-story-page">
+      <button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К профилю</button>
+      <p className="eyebrow">ИСТОРИИ</p>
+      <h2>Истории</h2>
+      <div className="story-section-tabs" role="tablist" aria-label="Разделы историй">
+        <button type="button" className={storySection === 'publish' ? 'active' : ''} onClick={() => setStorySection('publish')}>Выложить</button>
+        <button type="button" className={storySection === 'archive' ? 'active' : ''} onClick={() => { setStorySection('archive'); void loadStoryArchive() }}>Архив историй</button>
+      </div>
+      {storySection === 'publish' ? <>
+        <h3 className="story-section-title">Поделиться историей</h3>
+        <p className="settings-description">Истории видят только люди, с которыми у вас уже есть диалог. Через 24 часа они исчезают.</p>
+        <form className="story-form" onSubmit={publishStory}>
+          <input ref={storyInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" onChange={handleStorySelection} />
+          <button type="button" className="story-add" onClick={() => storyInputRef.current?.click()}>Добавить историю</button>
+          <label>Размер<select value={storyAspectRatio} onChange={(event) => setStoryAspectRatio(event.target.value)}><option value="9:16">Вертикальный · 9:16</option><option value="1:1">Квадрат · 1:1</option><option value="16:9">Горизонтальный · 16:9</option></select></label>
+          {storyPreviewUrl && <div className={`story-preview ratio-${storyAspectRatio.replace(':', '-')}`}>{storyFile?.type.startsWith('video/') ? <video src={storyPreviewUrl} controls /> : <img src={storyPreviewUrl} alt="Предпросмотр истории" />}{storyOverlayText && <strong>{storyOverlayText}</strong>}</div>}
+          <label>Надпись на истории<input value={storyOverlayText} onChange={(event) => setStoryOverlayText(event.target.value.slice(0, 80))} maxLength={80} placeholder="Например, доброе утро" /></label>
+          <label>Описание<textarea value={storyDescription} onChange={(event) => setStoryDescription(event.target.value.slice(0, 180))} maxLength={180} placeholder="Описание истории" /></label>
+          <button className="story-publish" disabled={!storyFile || storyUploading}>{storyUploading ? 'Публикуем…' : 'Опубликовать'}</button>
+          {storyError && <p className="privacy-error">{storyError}</p>}
+        </form>
+      </> : <section className="story-archive">
+        <p className="settings-description">Эти истории видны только вам. Они остаются в архиве после истечения 24 часов.</p>
+        {storyArchiveLoading && <p className="list-note">Загружаем архив…</p>}
+        {storyArchiveError && <p className="privacy-error">{storyArchiveError}</p>}
+        {!storyArchiveLoading && !storyArchiveError && !storyArchive.length && <p className="list-note">В архиве пока нет историй.</p>}
+        <div className="story-archive-grid">{storyArchive.map((story) => <button type="button" key={story.story_id} className="story-archive-card" onClick={() => { void openStory(story) }}>
+          {storyUrls[story.story_id] ? story.media_type === 'video' ? <video src={storyUrls[story.story_id]} muted /> : <img src={storyUrls[story.story_id]} alt="История из архива" /> : <span>Загрузка…</span>}
+          <small>{new Date(story.created_at).toLocaleDateString('ru-RU')}</small>
+        </button>)}</div>
+      </section>}
+    </div>
+  )
+
   const renderChatRow = (chat: Chat) => (
     <button key={chat.conversation_id} onClick={() => { void selectChat(chat) }} onContextMenu={(event) => { event.preventDefault(); openChatMenu(chat, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startChatHold(chat, touch.clientX, touch.clientY) }} onTouchMove={clearChatHold} onTouchEnd={clearChatHold} onTouchCancel={clearChatHold} className={`chat-row ${chat.conversation_id === selectedConversation ? 'selected' : ''} ${chat.is_pinned ? 'pinned' : ''}`}>
       <span className={`avatar ${chat.conversation_id === favoritesConversationId ? 'favorites-avatar' : ''}`} style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{chat.conversation_id === favoritesConversationId ? <StarIcon /> : profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(displayNameFor(chat))}</span>
@@ -2664,7 +2720,7 @@ export default function App() {
     </section>}
 
     {!selectedProfile && activeNav === 'Профиль' && <div className="page-view settings-view profile-hub"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К профилю</button>{settingsSection === 'Профиль' && <><p className="eyebrow">АККАУНТ</p><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()}>{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'Настроить фото'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} /></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Оси' && <><p className="eyebrow">ВАЛЮТА</p><h2>Оси</h2><div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Ваш баланс</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><p className="eyebrow">АККАУНТ</p><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Отдельный код только для этого браузера. Он не меняет пароль аккаунта.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6 цифр" /></label><label>Повторите код<input type="password" inputMode="numeric" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : 'Сохранить'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}</div>}
-    {!selectedProfile && activeNav === 'Профиль' && settingsSection === 'Истории' && <div className="page-view settings-view story-settings-page profile-story-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К профилю</button><p className="eyebrow">ИСТОРИИ</p><h2>Поделиться историей</h2><p className="settings-description">Истории видят только люди, с которыми у вас уже есть диалог. Через 24 часа они исчезают.</p><form className="story-form" onSubmit={publishStory}><input ref={storyInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" onChange={handleStorySelection} /><button type="button" className="story-add" onClick={() => storyInputRef.current?.click()}>Добавить историю</button><label>Размер<select value={storyAspectRatio} onChange={(event) => setStoryAspectRatio(event.target.value)}><option value="9:16">Вертикальный · 9:16</option><option value="1:1">Квадрат · 1:1</option><option value="16:9">Горизонтальный · 16:9</option></select></label>{storyPreviewUrl && <div className={`story-preview ratio-${storyAspectRatio.replace(':', '-')}`}>{storyFile?.type.startsWith('video/') ? <video src={storyPreviewUrl} controls /> : <img src={storyPreviewUrl} alt="Предпросмотр истории" />}{storyOverlayText && <strong>{storyOverlayText}</strong>}</div>}<label>Надпись на истории<input value={storyOverlayText} onChange={(event) => setStoryOverlayText(event.target.value.slice(0, 80))} maxLength={80} placeholder="Например, доброе утро" /></label><label>Описание<textarea value={storyDescription} onChange={(event) => setStoryDescription(event.target.value.slice(0, 180))} maxLength={180} placeholder="Описание истории" /></label><button className="story-publish" disabled={!storyFile || storyUploading}>{storyUploading ? 'Публикуем…' : 'Опубликовать'}</button>{storyError && <p className="privacy-error">{storyError}</p>}</form></div>}
+    {!selectedProfile && activeNav === 'Профиль' && settingsSection === 'Истории' && renderProfileStoryPage()}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && currentIsAdmin && <div className="page-view settings-view admin-page"><p className="eyebrow">АДМИНИСТРАТОР</p><h2>Бейджи пользователей</h2><p className="settings-description">Выдавайте роли людям. Белый бейдж администратора назначается только системой и виден только у вас.</p><form className="admin-search-form" onSubmit={searchAdminUsers}><input value={adminSearch} onChange={(event) => setAdminSearch(event.target.value)} placeholder="Найти по username" /><button className="privacy-save" disabled={adminLoading}>{adminLoading ? 'Ищем…' : 'Найти'}</button></form>{adminError && <p className="privacy-error">{adminError}</p>}<div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={profile.id}><span className="avatar" style={{ backgroundColor: profile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(profile.avatar_path) ? <img src={profileAvatarUrl(profile.avatar_path) as string} alt="" /> : initials(profile.display_name || profile.username)}</span><div><strong>{profile.display_name || `@${profile.username}`}<RoleBadge isAdmin={profile.is_admin} badge={profile.badge} /></strong><small>@{profile.username}</small></div><div className="admin-badge-actions"><button className="badge-helper" onClick={() => { void assignBadge(profile, 'helper') }}>Хелпер</button><button className="badge-idea" onClick={() => { void assignBadge(profile, 'idea') }}>Идейник</button><button className="badge-clear" onClick={() => { void assignBadge(profile, null) }}>Снять</button></div></div>)}</div></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Оси' && <div className="page-view settings-view osi-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ВАЛЮТА</p><h2>Оси</h2><div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Ваш баланс</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div><p className="settings-description">Оси — внутренняя валюта Osirium. Пока её нельзя заработать, но баланс уже сохраняется в профиле.</p></div>}
     {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <div className="page-view settings-view admin-page admin-page-secondary"><p className="eyebrow">ДОСТУП И ВАЛЮТА</p><h2>Блокировка и Оси</h2><p className="settings-description">Выдавайте Оси или блокируйте аккаунты. Заблокированный пользователь не сможет войти и писать сообщения.</p><div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={`controls-${profile.id}`}><div><strong>@{profile.username}</strong><small>{profile.is_banned ? 'Заблокирован' : 'Активен'}</small></div><div className="admin-badge-actions"><input className="osi-amount-input" type="number" min="1" step="1" value={osiAmount} onChange={(event) => setOsiAmount(event.target.value)} aria-label="Количество Оси" /><button className="badge-idea" onClick={() => { void grantOsi(profile) }}>Выдать Оси</button><button className={profile.is_banned ? 'badge-unban' : 'badge-ban'} onClick={() => { void setUserBan(profile, !profile.is_banned) }}>{profile.is_banned ? 'Разблокировать' : 'Заблокировать'}</button></div></div>)}</div></div>}
