@@ -28,6 +28,43 @@ Deno.serve(async (request) => {
 
   try {
     const input = await request.json()
+    if (typeof input.topup_id === 'string') {
+      const topupId = input.topup_id as string
+      const { data: topup } = await admin
+        .from('manual_osi_topups')
+        .select('id, user_id, osi_amount, rub_amount, status')
+        .eq('id', topupId)
+        .eq('user_id', user.id)
+        .eq('status', 'pending')
+        .maybeSingle()
+      if (!topup) return response({ error: 'Topup request not found' }, 404)
+
+      const { data: sender } = await admin.from('profiles').select('display_name, username').eq('id', user.id).maybeSingle()
+      const { data: adminProfiles } = await admin.from('profiles').select('id').eq('public_id', 1)
+      const adminIds = (adminProfiles ?? []).map((profile) => profile.id)
+      if (!adminIds.length) return response({ delivered: 0 })
+
+      const { data: subscriptions } = await admin.from('push_subscriptions').select('endpoint, p256dh, auth').in('user_id', adminIds)
+      const senderName = sender?.display_name || sender?.username || 'Пользователь'
+      const payload = JSON.stringify({
+        title: 'Osirium',
+        body: `Новая заявка на пополнение от ${senderName}: ${topup.osi_amount} Осей (${topup.rub_amount} ₽)`,
+        url: '/?section=admin-topups',
+        tag: `topup-${topup.id}`,
+      })
+      webpush.setVapidDetails('mailto:push@osirium.lol', vapidPublicKey, vapidPrivateKey)
+      let delivered = 0
+      await Promise.all((subscriptions ?? []).map(async (subscription) => {
+        try {
+          await webpush.sendNotification({ endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } }, payload)
+          delivered += 1
+        } catch (error) {
+          const statusCode = typeof error === 'object' && error && 'statusCode' in error ? Number(error.statusCode) : 0
+          if (statusCode === 404 || statusCode === 410) await admin.from('push_subscriptions').delete().eq('endpoint', subscription.endpoint)
+        }
+      }))
+      return response({ delivered })
+    }
     if (typeof input.announcement_id === 'string') {
       const announcementId = input.announcement_id as string
       const { data: adminProfile } = await admin.from('profiles').select('id').eq('id', user.id).eq('public_id', 1).maybeSingle()

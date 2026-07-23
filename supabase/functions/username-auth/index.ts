@@ -13,7 +13,7 @@ Deno.serve(async (request) => {
   if (request.method !== 'POST') return response({ error: 'Method not allowed' }, 405)
 
   try {
-    const { action, username: rawUsername, password } = await request.json()
+    const { action, username: rawUsername, password, referral_code: rawReferralCode } = await request.json()
     const username = String(rawUsername || '').trim().toLowerCase()
     if (!['register', 'login'].includes(action)) return response({ error: 'Неверное действие.' }, 400)
     if (!/^[a-z0-9_]{3,24}$/.test(username)) return response({ error: 'Логин должен содержать от 3 до 24 символов: латиница, цифры или _.' }, 400)
@@ -39,6 +39,8 @@ Deno.serve(async (request) => {
       })
       if (error || !data.user) return response({ error: error?.message === 'User already registered' ? 'Этот логин уже занят.' : 'Не удалось создать аккаунт.' }, 400)
       const { error: profileError } = await admin.from('profiles').upsert({ id: data.user.id, display_name: username, username })
+      const referralCode = String(rawReferralCode || '').trim().toUpperCase()
+      if (!profileError && referralCode) await admin.rpc('apply_referral_invite', { p_new_user_id: data.user.id, p_referral_code: referralCode })
       if (profileError) return response({ error: 'Аккаунт создан, но профиль не удалось подготовить.' }, 500)
     } else {
       const { data: profile } = await admin.from('profiles').select('id, is_banned, ban_reason').eq('username', username).maybeSingle()

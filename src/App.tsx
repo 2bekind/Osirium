@@ -30,6 +30,13 @@ import {
 } from '@astraicons/react/linear'
 import { type Session } from '@supabase/supabase-js'
 import { hasSupabase, supabase } from './supabase'
+import './prime.css'
+import './celebration.css'
+import './prime-icon-picker.css'
+import './account-switcher.css'
+import './prime-name.css'
+import './prime-name-fix.css'
+import './prime-name-list-fix.css'
 
 function triggerHaptic(pattern: number | number[] = 8) {
   if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(pattern)
@@ -45,6 +52,10 @@ type Profile = {
   badge: 'helper' | 'idea' | null
   is_banned: boolean
   last_seen_at: string | null
+  prime_plan?: 'light' | 'medium' | 'extra' | null
+  nickname_icon?: string | null
+  nickname_color?: string | null
+  nickname_font?: string | null
 }
 
 type Chat = Profile & {
@@ -102,6 +113,17 @@ type CallSignal = {
   created_at?: string
 }
 
+type ManualOsiTopup = {
+  id: string
+  user_id: string
+  username: string
+  display_name: string
+  payer_name: string
+  osi_amount: number
+  rub_amount: number | string
+  created_at: string
+}
+
 type MessageMenu = {
   message: Message
   x: number
@@ -113,7 +135,7 @@ type ChatMenu = {
   chat: Chat
   x: number
   y: number
-  mode: 'actions' | 'block'
+  mode: 'actions' | 'block' | 'delete'
 }
 
 type Story = {
@@ -149,14 +171,66 @@ const appLockedStorageKey = (userId: string) => `osirium:local-app-locked:${user
 const lockPasswordIterations = 210_000
 const favoritesConversationId = 'local:favorites'
 const favoritesStorageKey = (userId: string) => `osirium:favorites:${userId}`
+const savedAccountsStorageKey = 'osirium:saved-accounts:v1'
+
+type SavedAccount = {
+  userId: string
+  username: string
+  displayName: string
+  avatarPath: string | null
+  avatarColor: string | null
+  accessToken: string
+  refreshToken: string
+  lastUsedAt: number
+}
+
+function readSavedAccounts(): SavedAccount[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(savedAccountsStorageKey) || '[]') as unknown
+    if (!Array.isArray(value)) return []
+    return value.filter((item): item is SavedAccount => Boolean(item && typeof item === 'object' && typeof (item as SavedAccount).userId === 'string' && typeof (item as SavedAccount).accessToken === 'string' && typeof (item as SavedAccount).refreshToken === 'string')).slice(0, 4)
+  } catch {
+    return []
+  }
+}
+
+function writeSavedAccounts(accounts: SavedAccount[]) {
+  const next = accounts.slice(0, 4)
+  window.localStorage.setItem(savedAccountsStorageKey, JSON.stringify(next))
+  return next
+}
+
+function saveAccountSession(account: SavedAccount) {
+  const current = readSavedAccounts().filter((item) => item.userId !== account.userId)
+  return writeSavedAccounts([account, ...current].sort((a, b) => b.lastUsedAt - a.lastUsedAt))
+}
+
+function removeSavedAccountSession(userId: string) {
+  return writeSavedAccounts(readSavedAccounts().filter((item) => item.userId !== userId))
+}
 
 type PrivacyProfile = {
   username: string | null
   display_name: string | null
   bio: string | null
   avatar_path: string | null
+  avatar_color: string | null
   public_id: number | null
   osi_balance: number | null
+}
+
+type StarProfile = {
+  referral_code: string | null
+  invited_count: number
+  osi_balance: number
+  birthday: string | null
+  plan: 'light' | 'medium' | 'extra' | null
+  expires_at: string | null
+  nickname_icon: string | null
+  nickname_color: string | null
+  nickname_font: string | null
+  refundable_amount: number | null
+  refund_available_until: string | null
 }
 
 type LocalAppLock = {
@@ -282,6 +356,21 @@ function formatPublicId(value: number | null) {
   return value === null ? '' : String(value).padStart(12, '0')
 }
 
+const primeIconOptions = [
+  { id: 'star', label: 'Звезда', glyph: '✦' },
+  { id: 'sparkle', label: 'Искра', glyph: '✧' },
+  { id: 'moon', label: 'Луна', glyph: '☾' },
+  { id: 'wave', label: 'Волна', glyph: '〰' },
+  { id: 'heart', label: 'Сердце', glyph: '♥' },
+]
+
+function birthdayInputValue(value: string | null) {
+  if (!value) return ''
+  const [year, month, day] = value.slice(0, 10).split('-')
+  if (!year || !month || !day) return ''
+  return year === '2000' ? `${day}.${month}` : `${day}.${month}.${year}`
+}
+
 function RoleBadge({ isAdmin, badge }: { isAdmin?: boolean; badge?: Profile['badge'] }) {
   if (isAdmin) return <span className="admin-badge" aria-label="Администратор"><CheckIcon /></span>
   if (!badge) return null
@@ -380,14 +469,30 @@ export default function App() {
   const [contactError, setContactError] = useState('')
   const [authenticated, setAuthenticated] = useState(!hasSupabase)
   const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+  const [savedAccounts, setSavedAccounts] = useState<SavedAccount[]>(() => readSavedAccounts())
+  const [accountSwitcherOpen, setAccountSwitcherOpen] = useState(false)
+  const [accountSwitcherError, setAccountSwitcherError] = useState('')
+  const [accountSwitchingId, setAccountSwitchingId] = useState<string | null>(null)
   const [currentUsername, setCurrentUsername] = useState('пользователь')
   const [currentPublicId, setCurrentPublicId] = useState<number | null>(null)
   const [currentIsAdmin, setCurrentIsAdmin] = useState(false)
   const [currentOsiBalance, setCurrentOsiBalance] = useState(0)
   const [currentDisplayName, setCurrentDisplayName] = useState('')
   const [profileBio, setProfileBio] = useState('')
+  const [birthdayValue, setBirthdayValue] = useState('')
   const [currentAvatarUrl, setCurrentAvatarUrl] = useState<string | null>(null)
-  const [settingsSection, setSettingsSection] = useState<'Профиль' | 'Оси' | 'Истории' | 'Уведомления' | 'Оформление' | 'Конфиденциальность' | 'Локальный пароль' | 'Опасная зона' | 'Админ-панель'>('Профиль')
+  const [settingsSection, setSettingsSection] = useState<'Профиль' | 'Оси' | 'Star' | 'Истории' | 'Уведомления' | 'Оформление' | 'Конфиденциальность' | 'Локальный пароль' | 'Опасная зона' | 'Админ-панель'>('Профиль')
+  const [starProfile, setStarProfile] = useState<StarProfile | null>(null)
+  const [starLoading, setStarLoading] = useState(false)
+  const [starSaving, setStarSaving] = useState(false)
+  const [starError, setStarError] = useState('')
+  const [starPurchasePlan, setStarPurchasePlan] = useState<'light' | 'medium' | 'extra' | null>(null)
+  const [primeCelebration, setPrimeCelebration] = useState(false)
+  const [starIcon, setStarIcon] = useState('star')
+  const [primeIconPickerOpen, setPrimeIconPickerOpen] = useState(false)
+  const [primeRefundConfirmOpen, setPrimeRefundConfirmOpen] = useState(false)
+  const [starColor, setStarColor] = useState('#ffffff')
+  const [starFont, setStarFont] = useState('manrope')
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false)
   const [adminSearch, setAdminSearch] = useState('')
   const [adminResults, setAdminResults] = useState<Profile[]>([])
@@ -397,6 +502,18 @@ export default function App() {
   const [announcementSaving, setAnnouncementSaving] = useState(false)
   const [announcementError, setAnnouncementError] = useState('')
   const [osiAmount, setOsiAmount] = useState('100')
+  const [osiTopupOpen, setOsiTopupOpen] = useState(false)
+  const [osiTopupStep, setOsiTopupStep] = useState<'payer' | 'notice' | 'amount'>('payer')
+  const [osiTopupAmount, setOsiTopupAmount] = useState('100')
+  const [osiTopupPayerName, setOsiTopupPayerName] = useState('')
+  const [osiTopupSubmitting, setOsiTopupSubmitting] = useState(false)
+  const [osiTopupError, setOsiTopupError] = useState('')
+  const [osiTopupNotice, setOsiTopupNotice] = useState('')
+  const [adminTopups, setAdminTopups] = useState<ManualOsiTopup[]>([])
+  const [adminTopupsLoading, setAdminTopupsLoading] = useState(false)
+  const [adminTopupReviewingId, setAdminTopupReviewingId] = useState<string | null>(null)
+  const [adminPrimePlan, setAdminPrimePlan] = useState<'light' | 'medium' | 'extra'>('light')
+  const [adminPrimeGrantingId, setAdminPrimeGrantingId] = useState<string | null>(null)
   const [adminAudit, setAdminAudit] = useState<AdminAudit[]>([])
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileError, setProfileError] = useState('')
@@ -421,6 +538,7 @@ export default function App() {
   const [authMode, setAuthMode] = useState<'login' | 'register'>('register')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [referralCode, setReferralCode] = useState(() => new URLSearchParams(window.location.search).get('invite')?.toUpperCase() || '')
   const [authError, setAuthError] = useState('')
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | 'unsupported'>(() => 'Notification' in window ? Notification.permission : 'unsupported')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => window.localStorage.getItem('osirium:theme') === 'light' ? 'light' : 'dark')
@@ -463,7 +581,7 @@ export default function App() {
   const [archiveStoryMenu, setArchiveStoryMenu] = useState<{ story: Story; x: number; y: number } | null>(null)
   const [messageImageUrls, setMessageImageUrls] = useState<Record<string, string>>({})
   const [loadedMessageImages, setLoadedMessageImages] = useState<Record<string, boolean>>({})
-  const [openedImage, setOpenedImage] = useState<{ src: string; name: string } | null>(null)
+  const [openedImage, setOpenedImage] = useState<{ id: string; src: string; name: string } | null>(null)
   const [imageScale, setImageScale] = useState(1)
   const [callTarget, setCallTarget] = useState<Chat | null>(null)
   const [callStatus, setCallStatus] = useState<'calling' | 'incoming' | 'connected' | 'microphone-error' | 'signal-error'>('calling')
@@ -511,6 +629,7 @@ export default function App() {
   const avatarCropDragRef = useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null)
   const notificationAudioRef = useRef<HTMLAudioElement | null>(null)
   const imagePinchRef = useRef<{ distance: number; scale: number } | null>(null)
+  const imageSwipeRef = useRef<{ x: number; y: number } | null>(null)
   const bootStartedAtRef = useRef(Date.now())
 
   chatsRef.current = chats
@@ -530,6 +649,10 @@ export default function App() {
   const displayedMessages = selectedConversation === favoritesConversationId && favoritesSearch.trim()
     ? messages.filter((message) => message.body.toLowerCase().includes(favoritesSearch.trim().toLowerCase()))
     : messages
+  const chatImages = messages.flatMap((message) => {
+    const src = message.image_path ? messageImageUrls[message.id] : null
+    return src ? [{ id: message.id, src, name: message.image_name || 'Фотография' }] : []
+  })
   const navIndex = ['Чаты', 'Профиль', 'Настройки'].indexOf(activeNav)
   function selectNavLabel(label: string) {
     if (label === activeNav) return
@@ -541,6 +664,11 @@ export default function App() {
   const query = search.trim().toLowerCase()
   const isUserSearch = query.length >= 3
   const displayNameFor = (profile: Pick<Profile, 'id' | 'username' | 'display_name'>) => contacts[profile.id] || profile.display_name || `@${profile.username}`
+  const renderPrimeName = (profile: Profile, label = displayNameFor(profile)) => {
+    const fontFamily = profile.prime_plan === 'extra' ? profile.nickname_font === 'serif' ? 'Georgia, serif' : profile.nickname_font === 'mono' ? 'ui-monospace, monospace' : 'Manrope, Arial, sans-serif' : undefined
+    const icon = profile.prime_plan && profile.prime_plan !== 'light' && profile.nickname_icon ? primeIconOptions.find((option) => option.id === profile.nickname_icon)?.glyph || '✦' : null
+    return <span className="prime-name" style={{ color: profile.prime_plan === 'extra' ? profile.nickname_color || undefined : undefined, fontFamily }}><span>{label}</span>{icon && <i className="prime-name-icon" aria-label="Prime">{icon}</i>}</span>
+  }
   const visibleChats = useMemo(
     () => chats
       .filter((item) => `${item.username} ${item.display_name} ${contacts[item.id] || ''}`.toLowerCase().includes(query))
@@ -589,12 +717,23 @@ export default function App() {
 
   const loadChats = useCallback(async () => {
     if (!supabase) return
-    const { data, error } = await supabase.rpc('list_direct_conversations')
+    const client = supabase
+    const { data, error } = await client.rpc('list_direct_conversations')
     if (error) {
       setChatError('Не удалось загрузить диалоги. Попробуйте обновить страницу.')
       return
     }
-    setChats((data ?? []).map((row: Record<string, unknown>) => ({ ...row, id: (row as { id?: string; other_user_id?: string }).id ?? (row as { other_user_id?: string }).other_user_id })) as ChatRow[])
+    const rows = (data ?? []).map((row: Record<string, unknown>) => ({ ...row, id: (row as { id?: string; other_user_id?: string }).id ?? (row as { other_user_id?: string }).other_user_id })) as ChatRow[]
+    const needsPrimeHydration = rows.some((row) => !Object.prototype.hasOwnProperty.call(row, 'prime_plan'))
+    if (!needsPrimeHydration) {
+      setChats(rows)
+      return
+    }
+    const hydrated = await Promise.all(rows.map(async (row) => {
+      const { data: profile } = await client.rpc('get_public_profile', { p_user_id: row.id })
+      return profile?.[0] ? { ...row, ...profile[0] } as ChatRow : row
+    }))
+    setChats(hydrated)
   }, [])
 
   const syncPushSubscription = useCallback(async (permission = notificationPermission) => {
@@ -696,6 +835,11 @@ export default function App() {
   function notifyMessageReaction(messageId: string) {
     if (!supabase) return
     void supabase.functions.invoke('send-push', { body: { message_id: messageId, event: 'message_reaction' } })
+  }
+
+  function notifyTopupRequested(topupId: string) {
+    if (!supabase) return
+    void supabase.functions.invoke('send-push', { body: { topup_id: topupId } })
   }
 
   async function toggleMessageReaction(message: Message) {
@@ -904,20 +1048,36 @@ export default function App() {
       }
 
       const { data: privacyProfile } = await resolveWithin(
-        client.from('profiles').select('username, display_name, bio, avatar_path, public_id, osi_balance').eq('id', user.id).maybeSingle(),
+        client.from('profiles').select('username, display_name, bio, avatar_path, avatar_color, public_id, osi_balance').eq('id', user.id).maybeSingle(),
       ).catch(() => ({ data: null }))
       if (!active) return
 
       const profile = privacyProfile as PrivacyProfile | null
+      if (session?.access_token && session.refresh_token) {
+        setSavedAccounts(saveAccountSession({
+          userId: user.id,
+          username: profile?.username || String(user.user_metadata?.username || 'пользователь'),
+          displayName: profile?.display_name || profile?.username || String(user.user_metadata?.username || 'пользователь'),
+          avatarPath: profile?.avatar_path || null,
+          avatarColor: profile?.avatar_color || null,
+          accessToken: session.access_token,
+          refreshToken: session.refresh_token,
+          lastUsedAt: Date.now(),
+        }))
+      }
       const lock = readLocalAppLock(user.id)
       const timeout = lock?.timeoutSeconds ?? 60
       setCurrentUsername(profile?.username || String(user.user_metadata?.username ?? 'пользователь'))
       setCurrentPublicId(profile?.public_id ?? null)
-      setCurrentIsAdmin(profile?.public_id === 1)
+      setCurrentIsAdmin(profile?.public_id === 1 || String(user.user_metadata?.username ?? '').trim().toLowerCase() === 'tetrix')
       setCurrentOsiBalance(profile?.osi_balance ?? 0)
       setCurrentDisplayName(profile?.display_name || profile?.username || String(user.user_metadata?.username ?? 'пользователь'))
       setProfileBio(profile?.bio || '')
       setCurrentAvatarUrl(profile?.avatar_path ? client.storage.from('avatars').getPublicUrl(profile.avatar_path).data.publicUrl : null)
+      void (async () => {
+        const { data } = await client.from('profiles').select('birthday').eq('id', user.id).maybeSingle()
+        setBirthdayValue(birthdayInputValue(data?.birthday || null))
+      })()
       setAppLockHash(lock?.passwordHash ?? null)
       setAppLockSalt(lock?.passwordSalt ?? null)
       setAppLockTimeout(timeout)
@@ -979,6 +1139,10 @@ export default function App() {
       document.removeEventListener('visibilitychange', refreshChats)
     }
   }, [authenticated, loadChats])
+
+  useEffect(() => {
+    if (authenticated && currentUserId) void loadStarProfile()
+  }, [authenticated, currentUserId])
 
   useEffect(() => {
     if (!appLockHash || !appLockSalt || !currentUserId || appLocked) return
@@ -1047,7 +1211,15 @@ export default function App() {
     setSearchLoading(true)
     const timeout = window.setTimeout(async () => {
       const { data, error } = await client.rpc('search_users', { search_text: query })
-      if (!error) setSearchResults(((data ?? []) as Profile[]).filter((profile) => profile.username.toLowerCase() === query))
+      if (!error) {
+        const matches = ((data ?? []) as Profile[]).filter((profile) => profile.username.toLowerCase() === query)
+        const profiles = await Promise.all(matches.map(async (profile) => {
+          if (Object.prototype.hasOwnProperty.call(profile, 'prime_plan')) return profile
+          const { data: publicProfile } = await client.rpc('get_public_profile', { p_user_id: profile.id })
+          return publicProfile?.[0] ? { ...profile, ...publicProfile[0] } as Profile : profile
+        }))
+        setSearchResults(profiles)
+      }
       else setChatError('Не удалось выполнить поиск пользователей.')
       setSearchLoading(false)
     }, 260)
@@ -1151,18 +1323,25 @@ export default function App() {
   }
 
   async function openProfile(profile: Chat) {
-    setSelectedProfile(profile)
     setSelectedProfileBio('')
     setContactLabel(contacts[profile.id] || profile.display_name || profile.username)
     setContactEditorOpen(false)
     setContactError('')
     setSelectedProfileLoading(true)
     if (!supabase) {
+      setSelectedProfile(profile)
       setSelectedProfileLoading(false)
       return
     }
     const { data, error } = await supabase.rpc('get_public_profile', { p_user_id: profile.id })
-    if (!error) setSelectedProfileBio(String(data?.[0]?.bio || ''))
+    if (!error && data?.[0]) {
+      const nextProfile = { ...profile, ...data[0] } as Chat
+      setSelectedProfileBio(String(data[0].bio || ''))
+      setSelectedProfile(nextProfile)
+      setChats((current) => current.map((item) => item.id === profile.id ? { ...item, ...data[0] } : item))
+    } else {
+      setSelectedProfile(profile)
+    }
     setSelectedProfileLoading(false)
   }
 
@@ -1234,11 +1413,27 @@ export default function App() {
     setAdminError('')
     const { data, error } = await supabase.rpc('search_users', { search_text: query })
     setAdminLoading(false)
+    const selfMatch: Profile[] = query === currentUsername.toLowerCase() && currentUserId ? [{
+      id: currentUserId,
+      username: currentUsername,
+      display_name: currentDisplayName || currentUsername,
+      avatar_color: null,
+      avatar_path: null,
+      is_admin: true,
+      badge: null,
+      is_banned: false,
+      last_seen_at: new Date().toISOString(),
+    }] : []
     if (error) {
+      if (selfMatch.length) {
+        setAdminResults(selfMatch)
+        return
+      }
       setAdminError('Не удалось найти пользователя.')
       return
     }
     const exactMatches = ((data ?? []) as Profile[]).filter((profile) => profile.username.toLowerCase() === query)
+    if (!exactMatches.length && selfMatch.length) exactMatches.push(...selfMatch)
     setAdminResults(exactMatches)
     if (!exactMatches.length) setAdminError('Пользователь не найден.')
   }
@@ -1262,12 +1457,75 @@ export default function App() {
       setAdminError('Укажите положительное целое количество Оси.')
       return
     }
-    const { error } = await supabase.rpc('admin_grant_osi', { p_user_id: profile.id, p_amount: amount })
-    if (error) setAdminError('Не удалось выдать Оси.')
+    const { data, error } = await supabase.rpc('admin_grant_osi', { p_user_id: profile.id, p_amount: amount })
+    if (error) setAdminError(profile.id === currentUserId ? 'Для выдачи Оси себе выполните SQL-миграцию админ-панели.' : 'Не удалось выдать Оси.')
     else {
+      if (profile.id === currentUserId && typeof data === 'number') setCurrentOsiBalance(data)
       setAdminError('Оси выданы.')
       void loadAdminAudit()
     }
+  }
+
+  async function requestOsiTopup(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase || osiTopupSubmitting) return
+    const amount = Number(osiTopupAmount)
+    if (!Number.isInteger(amount) || amount < 20) {
+      setOsiTopupError('Минимальное пополнение — 20 Осей.')
+      return
+    }
+    if (osiTopupPayerName.trim().length < 2) {
+      setOsiTopupError('Укажите имя владельца карты, как оно отображается при переводе.')
+      return
+    }
+    setOsiTopupSubmitting(true)
+    setOsiTopupError('')
+    const { data, error } = await supabase.rpc('request_manual_osi_topup', { p_osi_amount: amount, p_payer_name: osiTopupPayerName.trim() })
+    setOsiTopupSubmitting(false)
+    if (error) {
+      setOsiTopupError(error.message.includes('pending') ? 'У вас уже есть заявка, ожидающая проверки.' : `Не удалось отправить заявку: ${error.message}`)
+      return
+    }
+    setOsiTopupOpen(false)
+    setOsiTopupPayerName('')
+    setOsiTopupNotice('Заявка отправлена. Оси появятся после ручной проверки перевода.')
+    const topup = Array.isArray(data) ? data[0] : data
+    if (topup?.id) notifyTopupRequested(topup.id)
+  }
+
+  function proceedOsiTopupPayer(event: FormEvent) {
+    event.preventDefault()
+    if (osiTopupPayerName.trim().length < 2) {
+      setOsiTopupError('Укажите имя владельца карты, как оно отображается при переводе.')
+      return
+    }
+    setOsiTopupError('')
+    setOsiTopupStep('notice')
+  }
+
+  async function loadAdminTopups() {
+    if (!supabase || !currentIsAdmin) return
+    setAdminTopupsLoading(true)
+    const { data, error } = await supabase.rpc('list_pending_manual_osi_topups')
+    setAdminTopupsLoading(false)
+    if (error) {
+      setAdminError('Не удалось загрузить заявки на пополнение.')
+      return
+    }
+    setAdminTopups((data ?? []) as ManualOsiTopup[])
+  }
+
+  async function reviewOsiTopup(topup: ManualOsiTopup, approved: boolean) {
+    if (!supabase || !currentIsAdmin || adminTopupReviewingId) return
+    setAdminTopupReviewingId(topup.id)
+    const { data, error } = await supabase.rpc('review_manual_osi_topup', { p_request_id: topup.id, p_approve: approved })
+    setAdminTopupReviewingId(null)
+    if (error) {
+      setAdminError(`Не удалось обработать заявку: ${error.message}`)
+      return
+    }
+    if (approved && topup.user_id === currentUserId && typeof data === 'number') setCurrentOsiBalance(data)
+    setAdminTopups((current) => current.filter((item) => item.id !== topup.id))
   }
 
   async function setUserBan(profile: Profile, banned: boolean) {
@@ -1299,7 +1557,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (activeNav === 'Настройки' && settingsSection === 'Админ-панель') void loadAdminAudit()
+    if (activeNav === 'Настройки' && settingsSection === 'Админ-панель') {
+      void loadAdminAudit()
+      void loadAdminTopups()
+    }
   }, [activeNav, currentIsAdmin, settingsSection])
 
   function clearMessageHold() {
@@ -1406,6 +1667,38 @@ export default function App() {
     setChatMenu(null)
   }
 
+  async function deleteChatForMe(chat: Chat) {
+    if (!supabase) return
+    const { error } = await supabase.rpc('clear_direct_conversation_for_me', { p_conversation_id: chat.conversation_id })
+    if (error) {
+      setChatError('Не удалось удалить диалог.')
+      return
+    }
+    setChats((current) => current.filter((item) => item.conversation_id !== chat.conversation_id))
+    if (selectedConversation === chat.conversation_id) {
+      setSelectedConversation(null)
+      setMessages([])
+      setPinnedMessage(null)
+    }
+    setChatMenu(null)
+  }
+
+  async function deleteChatForEveryone(chat: Chat) {
+    if (!supabase) return
+    const { error } = await supabase.rpc('delete_direct_conversation_for_everyone', { p_conversation_id: chat.conversation_id })
+    if (error) {
+      setChatError('Не удалось удалить диалог у всех.')
+      return
+    }
+    setChats((current) => current.filter((item) => item.conversation_id !== chat.conversation_id))
+    if (selectedConversation === chat.conversation_id) {
+      setSelectedConversation(null)
+      setMessages([])
+      setPinnedMessage(null)
+    }
+    setChatMenu(null)
+  }
+
   async function setChatBlock(chat: Chat, hidden: boolean, blocked = true) {
     if (!supabase) return
     const { error } = await supabase.rpc('set_direct_conversation_block', { p_conversation_id: chat.conversation_id, p_hidden: hidden, p_blocked: blocked })
@@ -1448,6 +1741,23 @@ export default function App() {
       await navigator.clipboard.writeText(text)
     } catch {}
     setMessageMenu(null)
+  }
+
+  async function grantPrimeSubscription(profile: Profile) {
+    if (!supabase || !currentIsAdmin || adminPrimeGrantingId) return
+    setAdminPrimeGrantingId(profile.id)
+    setAdminError('')
+    const { error } = await supabase.rpc('admin_grant_prime_subscription', {
+      p_user_id: profile.id,
+      p_plan: adminPrimePlan,
+    })
+    setAdminPrimeGrantingId(null)
+    if (error) {
+      setAdminError(error.message.includes('higher Prime') ? 'У пользователя уже активен Prime уровнем выше.' : `Не удалось подарить Prime: ${error.message}`)
+      return
+    }
+    setAdminResults((current) => current.map((item) => item.id === profile.id ? { ...item, prime_plan: adminPrimePlan } : item))
+    setAdminError(`Prime ${adminPrimePlan === 'light' ? 'Light' : adminPrimePlan === 'medium' ? 'Medium' : 'Extra'} подарен на 30 дней.`)
   }
 
   async function downloadVoiceMessage(message: Message) {
@@ -1995,6 +2305,105 @@ export default function App() {
     setLocalPasswordAccessGranted(false)
     setPrivacyError('')
     setSettingsSection('Конфиденциальность')
+  }
+
+  async function loadStarProfile() {
+    if (!supabase || !currentUserId) return
+    setStarLoading(true)
+    setStarError('')
+    const { data, error } = await supabase.rpc('get_my_prime_profile')
+    setStarLoading(false)
+    if (error || !data?.[0]) {
+      setStarError('Не удалось загрузить Prime-профиль. Сначала примените новую SQL-миграцию.')
+      return
+    }
+    const profile = data[0] as StarProfile
+    setStarProfile(profile)
+    setCurrentOsiBalance(Number(profile.osi_balance || 0))
+    setStarIcon(profile.nickname_icon || 'star')
+    setStarColor(profile.nickname_color || '#ffffff')
+    setStarFont(profile.nickname_font || 'manrope')
+  }
+
+  async function purchaseStar(plan: 'light' | 'medium' | 'extra') {
+    if (!supabase) return false
+    setStarSaving(true)
+    setStarError('')
+    const { error } = await supabase.rpc('purchase_star_subscription', { p_plan: plan })
+    setStarSaving(false)
+    if (error) {
+      const missingPurchaseFunction = error.message.includes('purchase_star_subscription') || error.code === 'PGRST202'
+      setStarError(missingPurchaseFunction ? 'Prime ещё не подключён в базе. Выполните SQL-миграцию Prime в Supabase.' : error.message.includes('Not enough') ? 'Недостаточно Оси для этой подписки.' : error.message.includes('can only be renewed') ? 'До окончания текущего Prime можно продлить только этот же план.' : `Не удалось оформить Prime: ${error.message}`)
+      return false
+    }
+    await loadStarProfile()
+    setPrimeCelebration(true)
+    triggerHaptic([8, 32, 12])
+    window.setTimeout(() => setPrimeCelebration(false), 2400)
+    return true
+  }
+
+  async function refundPrime() {
+    if (!supabase || starSaving) return false
+    setStarSaving(true)
+    setStarError('')
+    const { error } = await supabase.rpc('refund_prime_subscription')
+    setStarSaving(false)
+    if (error) {
+      setStarError(error.message.includes('refund period') ? '48 часов на возврат уже прошли.' : `Не удалось вернуть Оси: ${error.message}`)
+      return false
+    }
+    await loadStarProfile()
+    return true
+  }
+
+  async function saveStarStyle(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase) return
+    setStarSaving(true)
+    setStarError('')
+    const { error } = await supabase.rpc('update_star_profile_style', { p_icon: starIcon, p_color: starColor, p_font: starFont })
+    setStarSaving(false)
+    if (error) {
+      setStarError('Не удалось сохранить оформление Prime. Цвет и шрифт доступны только в Extra.')
+      return
+    }
+    await loadStarProfile()
+  }
+
+  async function saveBirthday(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase) return
+    const source = birthdayValue.trim()
+    const match = source.match(/^(\d{2})\.(\d{2})(?:\.(\d{4}))?$/)
+    if (source && !match) {
+      setStarError('Введите дату в формате ДД.ММ или ДД.ММ.ГГГГ.')
+      return
+    }
+    const year = match?.[3] || '2000'
+    const month = match?.[2]
+    const day = match?.[1]
+    const birthday = match ? `${year}-${month}-${day}` : null
+    const dateCheck = birthday ? new Date(`${birthday}T12:00:00Z`) : null
+    if (birthday && (!dateCheck || Number.isNaN(dateCheck.getTime()) || dateCheck.getUTCFullYear() !== Number(year) || dateCheck.getUTCMonth() + 1 !== Number(month) || dateCheck.getUTCDate() !== Number(day))) {
+      setStarError('Такой даты не существует.')
+      return
+    }
+    setStarSaving(true)
+    setStarError('')
+    const { error } = await supabase.rpc('set_my_birthday', { p_birthday: birthday })
+    setStarSaving(false)
+    if (error) {
+      setStarError('Не удалось сохранить дату рождения.')
+      return
+    }
+    setBirthdayValue(birthdayInputValue(birthday))
+  }
+
+  async function copyInviteLink() {
+    if (!starProfile?.referral_code) return
+    const url = `${window.location.origin}/?invite=${encodeURIComponent(starProfile.referral_code)}`
+    await navigator.clipboard?.writeText(url).catch(() => undefined)
   }
 
   async function saveProfile(event: FormEvent) {
@@ -2577,8 +2986,14 @@ export default function App() {
   }
 
   function handleImageTouchStart(event: TouchEvent<HTMLImageElement>) {
+    if (event.touches.length === 1) {
+      const touch = event.touches[0]
+      imageSwipeRef.current = { x: touch.clientX, y: touch.clientY }
+      return
+    }
     if (event.touches.length !== 2) return
     const [first, second] = [event.touches[0], event.touches[1]]
+    imageSwipeRef.current = null
     imagePinchRef.current = { distance: Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY), scale: imageScale }
   }
 
@@ -2592,7 +3007,33 @@ export default function App() {
 
   function resetImageZoom() {
     imagePinchRef.current = null
+    imageSwipeRef.current = null
     setImageScale(1)
+  }
+
+  function moveOpenedImage(offset: number) {
+    if (!openedImage) return
+    const currentIndex = chatImages.findIndex((image) => image.id === openedImage.id)
+    const nextImage = chatImages[currentIndex + offset]
+    if (!nextImage) return
+    resetImageZoom()
+    setOpenedImage(nextImage)
+  }
+
+  function handleImageTouchEnd(event: TouchEvent<HTMLImageElement>) {
+    if (imagePinchRef.current) {
+      imagePinchRef.current = null
+      imageSwipeRef.current = null
+      return
+    }
+    const start = imageSwipeRef.current
+    const touch = event.changedTouches[0]
+    imageSwipeRef.current = null
+    if (!start || !touch || imageScale !== 1) return
+    const deltaX = touch.clientX - start.x
+    const deltaY = touch.clientY - start.y
+    if (Math.abs(deltaX) < 54 || Math.abs(deltaX) < Math.abs(deltaY)) return
+    moveOpenedImage(deltaX < 0 ? 1 : -1)
   }
 
   async function logout() {
@@ -2617,6 +3058,55 @@ export default function App() {
     setActiveNav('Чаты')
   }
 
+  async function switchAccount(account: SavedAccount) {
+    if (!supabase || account.userId === currentUserId) {
+      setAccountSwitcherOpen(false)
+      return
+    }
+    setAccountSwitchingId(account.userId)
+    setAccountSwitcherError('')
+    const { error } = await supabase.auth.setSession({ access_token: account.accessToken, refresh_token: account.refreshToken })
+    setAccountSwitchingId(null)
+    if (error) {
+      setSavedAccounts(removeSavedAccountSession(account.userId))
+      setAccountSwitcherError('Сессия этого аккаунта закончилась. Войдите в него заново.')
+      return
+    }
+    setAccountSwitcherOpen(false)
+    setShowWelcome(false)
+    setSelectedProfile(null)
+    setSelectedConversation(null)
+    setSettingsSection('Профиль')
+    setMobileSettingsOpen(false)
+    setActiveNav('Чаты')
+  }
+
+  async function addAnotherAccount() {
+    if (savedAccounts.length >= 4) {
+      setAccountSwitcherError('Можно сохранить не больше четырёх аккаунтов.')
+      return
+    }
+    if (supabase) await supabase.auth.signOut({ scope: 'local' })
+    setAccountSwitcherOpen(false)
+    setAuthMode('login')
+    setUsername('')
+    setPassword('')
+    setAuthError('')
+    setSettingsSection('Профиль')
+    setMobileSettingsOpen(false)
+    setActiveNav('Чаты')
+    setShowWelcome(true)
+  }
+
+  async function deleteSavedAccount(account: SavedAccount) {
+    const isCurrent = account.userId === currentUserId
+    setSavedAccounts(removeSavedAccountSession(account.userId))
+    if (isCurrent) {
+      setAccountSwitcherOpen(false)
+      await logout()
+    }
+  }
+
   async function authenticate(event: FormEvent) {
     event.preventDefault()
     const login = username.trim().toLowerCase()
@@ -2636,7 +3126,7 @@ export default function App() {
     setAuthLoading(true)
     setAuthError('')
     const { data, error } = await supabase.functions.invoke('username-auth', {
-      body: { action: authMode, username: login, password },
+      body: { action: authMode, username: login, password, referral_code: authMode === 'register' ? referralCode.trim().toUpperCase() : undefined },
     })
     setAuthLoading(false)
     if (error || !data?.session) {
@@ -2702,7 +3192,7 @@ export default function App() {
     <button key={chat.conversation_id} onClick={() => { void selectChat(chat) }} onContextMenu={(event) => { event.preventDefault(); openChatMenu(chat, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startChatHold(chat, touch.clientX, touch.clientY) }} onTouchMove={clearChatHold} onTouchEnd={clearChatHold} onTouchCancel={clearChatHold} className={`chat-row ${chat.conversation_id === selectedConversation ? 'selected' : ''} ${chat.is_pinned ? 'pinned' : ''}`}>
       <span className={`avatar ${chat.conversation_id === favoritesConversationId ? 'favorites-avatar' : ''}`} style={{ backgroundColor: chat.avatar_color || defaultAvatarColor }}>{chat.conversation_id === favoritesConversationId ? <StarIcon /> : profileAvatarUrl(chat.avatar_path) ? <img src={profileAvatarUrl(chat.avatar_path) as string} alt="" /> : initials(displayNameFor(chat))}</span>
       <span className="chat-copy">
-        <span className="chat-line"><strong>{displayNameFor(chat)}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}{chat.is_pinned && <span className="chat-pin-indicator" aria-label="Чат закреплён"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l-1 5 3 3v2H6v-2l3-3-1-5Zm4 10v6" /></svg></span>}</time></span>
+        <span className="chat-line"><strong>{renderPrimeName(chat)}<RoleBadge isAdmin={chat.is_admin} badge={chat.badge} /></strong><time>{formatTime(chat.last_created_at)}{chat.is_pinned && <span className="chat-pin-indicator" aria-label="Чат закреплён"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l-1 5 3 3v2H6v-2l3-3-1-5Zm4 10v6" /></svg></span>}</time></span>
         <span className={`chat-line ${formatPresence(chat.hidden_presence_since || chat.last_seen_at, Boolean(chat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}`}><small>{formatPresence(chat.hidden_presence_since || chat.last_seen_at, Boolean(chat.hidden_presence_since))} · {formatPreview(chat.last_body)}</small></span>
       </span>
     </button>
@@ -2711,17 +3201,54 @@ export default function App() {
   const renderUserResult = (profile: Profile) => (
     <button key={profile.id} onClick={() => { void startDirectChat(profile) }} className="chat-row search-result" disabled={directChatLoading === profile.id}>
       <span className="avatar" style={{ backgroundColor: profile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(profile.avatar_path) ? <img src={profileAvatarUrl(profile.avatar_path) as string} alt="" /> : initials(displayNameFor(profile))}</span>
-      <span className="chat-copy"><span className="chat-line"><strong>{displayNameFor(profile)}<RoleBadge isAdmin={profile.is_admin} badge={profile.badge} /></strong></span><span className="chat-line"><small>@{profile.username} · {directChatLoading === profile.id ? 'Открываем диалог…' : 'Начать диалог'}</small></span></span>
+      <span className="chat-copy"><span className="chat-line"><strong>{renderPrimeName(profile)}<RoleBadge isAdmin={profile.is_admin} badge={profile.badge} /></strong></span><span className="chat-line"><small>@{profile.username} · {directChatLoading === profile.id ? 'Открываем диалог…' : 'Начать диалог'}</small></span></span>
     </button>
   )
 
   return <main className={`app-shell ${mobileSettingsOpen ? 'mobile-settings-open' : ''} ${activeNav === 'Настройки' ? 'settings-active' : ''}`}>
+    {primeCelebration && <div className="prime-celebration" aria-hidden="true">{Array.from({ length: 32 }, (_, index) => <i key={index} className="prime-confetti" style={{ '--angle': `${index * 31}deg`, '--x': `${Math.cos(index * .72) * (150 + (index % 5) * 24)}px`, '--y': `${Math.sin(index * .72) * (140 + (index % 4) * 26) + 120}px`, '--confetti': ['#ffffff', '#b39cff', '#79b8ff', '#ffe169', '#ff8fab'][index % 5] } as CSSProperties} />)}</div>}
+    {accountSwitcherOpen && <div className="account-switcher-overlay" role="dialog" aria-modal="true" aria-label="Аккаунты" onClick={() => !accountSwitchingId && setAccountSwitcherOpen(false)}><section className="account-switcher-card" onClick={(event) => event.stopPropagation()}><p className="eyebrow">АККАУНТЫ</p><h2>Переключить аккаунт</h2><p>На этом устройстве можно сохранить до четырёх аккаунтов.</p><div className="account-switcher-list">{savedAccounts.map((account) => <div className={`account-switcher-row ${account.userId === currentUserId ? 'is-current' : ''}`} key={account.userId}><button type="button" className="account-switcher-select" onClick={() => { void switchAccount(account) }} disabled={Boolean(accountSwitchingId)}><span className="avatar" style={{ backgroundColor: account.avatarColor || defaultAvatarColor }}>{profileAvatarUrl(account.avatarPath) ? <img src={profileAvatarUrl(account.avatarPath) as string} alt="" /> : initials(account.displayName || account.username)}</span><span><strong>{account.displayName || account.username}</strong><small>@{account.username}{account.userId === currentUserId ? ' · Сейчас активен' : ''}</small></span></button><button type="button" className="account-switcher-remove" aria-label={`Удалить ${account.username} из списка`} onClick={() => { void deleteSavedAccount(account) }} disabled={Boolean(accountSwitchingId)}><TrashIcon /></button></div>)}</div>{accountSwitcherError && <p className="privacy-error">{accountSwitcherError}</p>}<button type="button" className="account-switcher-add" onClick={() => { void addAnotherAccount() }} disabled={savedAccounts.length >= 4 || Boolean(accountSwitchingId)}>{savedAccounts.length >= 4 ? 'Достигнут лимит аккаунтов' : 'Войти в другой аккаунт'}</button></section></div>}
     <audio ref={notificationAudioRef} src="/message-notification.mp3" preload="auto" />
     <audio ref={callRingtoneAudioRef} src="/call-ringtone.mp3" preload="auto" loop />
     <audio ref={callMicrophoneMuteAudioRef} src="/call-microphone-mute.mp3" preload="auto" />
     <audio ref={callMicrophoneUnmuteAudioRef} src="/call-microphone-unmute.mp3" preload="auto" />
     <audio ref={callSoundMuteAudioRef} src="/call-sound-mute.mp3" preload="auto" />
     <audio ref={callSoundUnmuteAudioRef} src="/call-sound-unmute.mp3" preload="auto" />
+    {starPurchasePlan && <div className="star-purchase-overlay" role="dialog" aria-modal="true" aria-label="Оформление Prime" onClick={() => !starSaving && setStarPurchasePlan(null)}><section className="star-purchase-card" onClick={(event) => event.stopPropagation()}><p className="eyebrow">ОФОРМЛЕНИЕ PRIME</p><h2>Prime {starPurchasePlan === 'light' ? 'Light' : starPurchasePlan === 'medium' ? 'Medium' : 'Extra'}</h2><p>{starPurchasePlan === 'light' ? 'Премиальные эмодзи Osirium.' : starPurchasePlan === 'medium' ? 'Премиальные эмодзи и иконка рядом с ником.' : 'Все возможности Prime: иконка, цвет и шрифт ника.'}</p><div><span>Срок</span><strong>30 дней</strong></div><div><span>Стоимость</span><strong>{starPurchasePlan === 'light' ? 100 : starPurchasePlan === 'medium' ? 150 : 300} Оси</strong></div><small>На балансе: {currentOsiBalance.toLocaleString('ru-RU')} Оси</small>{starError && <small className="privacy-error">{starError}</small>}<button type="button" className="privacy-save" disabled={starSaving} onClick={() => { void purchaseStar(starPurchasePlan).then((purchased) => { if (purchased) setStarPurchasePlan(null) }) }}>{starSaving ? 'Оформляем…' : starProfile?.plan === starPurchasePlan ? 'Продлить Prime' : 'Оформить Prime'}</button><button type="button" className="star-purchase-cancel" disabled={starSaving} onClick={() => setStarPurchasePlan(null)}>Отмена</button></section></div>}
+    {primeRefundConfirmOpen && <div className="star-purchase-overlay" role="dialog" aria-modal="true" aria-label="Подтверждение возврата Prime" onClick={() => !starSaving && setPrimeRefundConfirmOpen(false)}><section className="star-purchase-card prime-refund-confirm" onClick={(event) => event.stopPropagation()}><p className="eyebrow">ВОЗВРАТ PRIME</p><h2>Вернуть Оси?</h2><p>Вернём {starProfile?.refundable_amount || 0} Оси. Последняя покупка или продление Prime будет отменена.</p><button type="button" className="privacy-save" disabled={starSaving} onClick={() => { void refundPrime().then((refunded) => { if (refunded) setPrimeRefundConfirmOpen(false) }) }}>{starSaving ? 'Возвращаем…' : `Вернуть ${starProfile?.refundable_amount || 0} Оси`}</button><button type="button" className="star-purchase-cancel" disabled={starSaving} onClick={() => setPrimeRefundConfirmOpen(false)}>Отмена</button></section></div>}
+    {osiTopupOpen && <div className="star-purchase-overlay" role="dialog" aria-modal="true" aria-label="Пополнение Осей" onClick={() => !osiTopupSubmitting && setOsiTopupOpen(false)}>{osiTopupStep === 'payer' ? <form className="star-purchase-card osi-topup-card" onSubmit={proceedOsiTopupPayer} onClick={(event) => event.stopPropagation()}><p className="eyebrow">ПОПОЛНЕНИЕ ОСЕЙ</p><h2>Имя владельца карты</h2><p>Укажите имя, которое будет видно при переводе. Оно нужно только для ручной проверки платежа.</p><label>Имя владельца карты<input type="text" maxLength={80} autoComplete="cc-name" value={osiTopupPayerName} onChange={(event) => setOsiTopupPayerName(event.target.value)} placeholder="Как отображается при переводе" autoFocus /></label>{osiTopupError && <small className="privacy-error">{osiTopupError}</small>}<button className="privacy-save">Продолжить</button><button type="button" className="star-purchase-cancel" onClick={() => setOsiTopupOpen(false)}>Отмена</button></form> : osiTopupStep === 'notice' ? <section className="star-purchase-card osi-topup-card" onClick={(event) => event.stopPropagation()}><p className="eyebrow">ВАЖНО</p><h2>Комментарий к переводу</h2><p>Не забудьте написать комментарий к переводу — <b>@{currentUsername}</b>, иначе перевод не будет принят.</p><button type="button" className="privacy-save" onClick={() => setOsiTopupStep('amount')}>Понятно</button></section> : <form className="star-purchase-card osi-topup-card" onSubmit={requestOsiTopup} onClick={(event) => event.stopPropagation()}><p className="eyebrow">ПОПОЛНЕНИЕ ОСЕЙ</p><h2>Сумма пополнения</h2><p>1 Ось = 0,5 ₽. Переведите сумму на ЮMoney и только после этого отправьте заявку.</p><label>Количество Осей<input type="number" min="20" step="1" inputMode="numeric" value={osiTopupAmount} onChange={(event) => setOsiTopupAmount(event.target.value)} autoFocus /></label><div><span>К оплате</span><strong>{Number.isInteger(Number(osiTopupAmount)) && Number(osiTopupAmount) >= 20 ? (Number(osiTopupAmount) * .5).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : '—'} ₽</strong></div><div><span>ЮMoney</span><strong className="osi-yoomoney-number">5599 0021 1430 5842</strong></div><small>Минимальное пополнение — 20 Осей (10 ₽). В комментарии к переводу укажите @{currentUsername}, чтобы заявку можно было быстро найти.</small>{osiTopupError && <small className="privacy-error">{osiTopupError}</small>}<button className="privacy-save" disabled={osiTopupSubmitting}>{osiTopupSubmitting ? 'Отправляем…' : 'Я перевёл сумму — отправить заявку'}</button><button type="button" className="star-purchase-cancel" disabled={osiTopupSubmitting} onClick={() => setOsiTopupOpen(false)}>Отмена</button></form>}</div>}
+    {!selectedProfile && activeNav === 'Профиль' && settingsSection === 'Star' && <div className="page-view settings-view star-page">
+      <button type="button" className="prime-page-back" aria-label="Вернуться к профилю" onClick={() => { setSettingsSection('Профиль'); setMobileSettingsOpen(false) }}><ArrowLeftIcon /></button>
+      <p className="eyebrow">ПОДПИСКА</p>
+      <h2>Prime</h2>
+      {starProfile?.plan && starProfile.expires_at && <section className="prime-status-card">
+        <strong>Prime {starProfile.plan === 'light' ? 'Light' : starProfile.plan === 'medium' ? 'Medium' : 'Extra'} активна</strong>
+        <p>Подписка закончится {new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(starProfile.expires_at))}.</p>
+      </section>}
+      {starLoading ? <p className="settings-description">Загружаем Prime…</p> : <>
+        <div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Баланс для Prime</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div><button type="button" className="osi-topup-button" onClick={() => { setOsiTopupError(''); setOsiTopupPayerName(''); setOsiTopupStep('payer'); setOsiTopupOpen(true) }}>Пополнить</button>{osiTopupNotice && <p className="osi-topup-notice">{osiTopupNotice}</p>}
+        <section className="star-invite-card"><strong>Пригласить друга</strong><p>За каждого нового друга — 5 Оси. Максимум три награды.</p><code>{starProfile?.referral_code || '—'}</code><button type="button" className="privacy-save" onClick={() => { void copyInviteLink() }} disabled={!starProfile?.referral_code}>Скопировать ссылку · {starProfile?.invited_count || 0}/3</button></section>
+        <div className="star-plans prime-plans">
+          {(['light', 'medium', 'extra'] as const).map((plan) => {
+            const current = starProfile?.plan === plan
+            const blocked = Boolean(starProfile?.plan && !current)
+            const name = plan === 'light' ? 'Light' : plan === 'medium' ? 'Medium' : 'Extra'
+            const description = plan === 'light' ? 'Премиальные эмодзи Osirium' : plan === 'medium' ? 'Light + иконка рядом с ником' : 'Цвет и шрифт ника для других'
+            const price = plan === 'light' ? 100 : plan === 'medium' ? 150 : 300
+            return <button key={plan} type="button" className={current ? 'is-current' : ''} onClick={() => setStarPurchasePlan(plan)} disabled={starSaving || blocked}><b>Prime {name}</b><span>{description}</span><strong>{current ? `Продлить · ${price} Оси` : `${price} Оси · 30 дней`}</strong><small className="prime-plan-note">{blocked ? 'Недоступно до окончания текущего Prime' : current ? 'Продлит текущую подписку на 30 дней' : ''}</small></button>
+          })}
+        </div>
+        {starProfile?.plan && <form className="privacy-form star-style-form" onSubmit={saveStarStyle}>
+          <p className="settings-description">Оформление ника доступно в Prime {starProfile.plan === 'light' ? 'Light' : starProfile.plan === 'medium' ? 'Medium' : 'Extra'}.</p>
+          <label>Иконка рядом с ником<div className="prime-icon-picker"><button type="button" className="prime-icon-trigger" onClick={() => setPrimeIconPickerOpen((open) => !open)} disabled={starProfile.plan === 'light'}><span><b>{primeIconOptions.find((option) => option.id === starIcon)?.glyph || '✦'}</b>{primeIconOptions.find((option) => option.id === starIcon)?.label || 'Звезда'}</span><i /></button>{primeIconPickerOpen && <div className="prime-icon-menu">{primeIconOptions.map((option) => <button key={option.id} type="button" className={starIcon === option.id ? 'active' : ''} onClick={() => { setStarIcon(option.id); setPrimeIconPickerOpen(false) }}><b>{option.glyph}</b>{option.label}</button>)}</div>}</div></label>
+          <label>Цвет ника<div className="prime-style-options">{['#ffffff', '#ff8fab', '#ffb86b', '#ffe169', '#7cdb9b', '#79b8ff', '#b39cff'].map((color) => <button key={color} type="button" className={`prime-color-option ${starColor === color ? 'active' : ''}`} style={{ '--prime-color': color } as CSSProperties} onClick={() => setStarColor(color)} disabled={starProfile.plan !== 'extra'} aria-label={`Выбрать цвет ${color}`} />)}</div></label>
+          <label>Шрифт ника<div className="prime-style-options">{[['manrope', 'Обычный'], ['serif', 'С засечками'], ['mono', 'Моно']].map(([font, title]) => <button key={font} type="button" className={`prime-font-option ${starFont === font ? 'active' : ''}`} style={{ fontFamily: font === 'serif' ? 'Georgia, serif' : font === 'mono' ? 'ui-monospace, monospace' : 'Manrope, Arial, sans-serif' }} onClick={() => setStarFont(font)} disabled={starProfile.plan !== 'extra'}>{title}</button>)}</div></label>
+          <button className="privacy-save" disabled={starSaving}>Сохранить оформление</button>
+        </form>}
+        {starProfile?.refundable_amount && starProfile.refund_available_until && <section className="prime-refund"><strong>Возврат Prime</strong><p>Можно вернуть {starProfile.refundable_amount} Оси до {new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(starProfile.refund_available_until))}.</p><button type="button" onClick={() => setPrimeRefundConfirmOpen(true)} disabled={starSaving}>Вернуть {starProfile.refundable_amount} Оси</button></section>}
+        {starError && <p className="privacy-error">{starError}</p>}
+      </>}
+    </div>}
     {appBooting && <div className="app-loader" role="status" aria-label="Загрузка Osirium"><div className="app-loader-mark" /><p>OSIRIUM</p><span>Загружаем пространство</span><i /></div>}
     <aside className="sidebar">
       <div className="sidebar-head"><h1>{activeNav === 'Чаты' ? 'Сообщения' : activeNav}</h1>{activeNav === 'Чаты' && <button className="icon-button" aria-label="Выложить историю" onClick={() => { setSelectedConversation(null); setMessages([]); setSelectedProfile(null); setActiveNav('Профиль'); setSettingsSection('Истории'); setStorySection('publish'); setMobileSettingsOpen(true) }}><PlusIcon /></button>}</div>
@@ -2740,10 +3267,10 @@ export default function App() {
       </section>}
       {chatError && <p className="sidebar-error" role="alert">{chatError}</p>}
       {activeNav === 'Главная' && <div className="sidebar-note"><span>СЕГОДНЯ</span><strong>Диалогов: {chats.length}</strong><p>Найдите человека по логину и начните приватный разговор.</p></div>}
-      {activeNav === 'Настройки' && <section className="settings-menu" onClick={() => setMobileSettingsOpen(true)}><p>АККАУНТ</p><button className={settingsSection === 'Профиль' ? 'active' : ''} onClick={() => setSettingsSection('Профиль')}><ProfileCircleIcon /><strong>Профиль</strong></button><button className={settingsSection === 'Оси' ? 'active' : ''} onClick={() => setSettingsSection('Оси')}><MoneyIcon /><strong>Оси</strong></button><button className={settingsSection === 'Конфиденциальность' ? 'active' : ''} onClick={() => setSettingsSection('Конфиденциальность')}><LockIcon /><strong>Конфиденциальность</strong></button>{currentIsAdmin && <><p>АДМИНИСТРАТОР</p><button className={settingsSection === 'Админ-панель' ? 'active' : ''} onClick={() => setSettingsSection('Админ-панель')}><Shield2Icon /><strong>Админ-панель</strong></button></>}<p>УПРАВЛЕНИЕ</p><button className={`danger ${settingsSection === 'Опасная зона' ? 'active' : ''}`} onClick={() => setSettingsSection('Опасная зона')}><TrashIcon /><strong>Опасная зона</strong></button></section>}
+      {activeNav === 'Настройки' && <section className="settings-menu" onClick={() => setMobileSettingsOpen(true)}><p>АККАУНТ</p><button className={settingsSection === 'Профиль' ? 'active' : ''} onClick={() => setSettingsSection('Профиль')}><ProfileCircleIcon /><strong>Профиль</strong></button><button className={settingsSection === 'Конфиденциальность' ? 'active' : ''} onClick={() => setSettingsSection('Конфиденциальность')}><LockIcon /><strong>Конфиденциальность</strong></button>{currentIsAdmin && <><p>АДМИНИСТРАТОР</p><button className={settingsSection === 'Админ-панель' ? 'active' : ''} onClick={() => setSettingsSection('Админ-панель')}><Shield2Icon /><strong>Админ-панель</strong></button></>}<p>УПРАВЛЕНИЕ</p><button className={`danger ${settingsSection === 'Опасная зона' ? 'active' : ''}`} onClick={() => setSettingsSection('Опасная зона')}><TrashIcon /><strong>Опасная зона</strong></button></section>}
       {activeNav === 'Настройки' && <section className="settings-menu stories-settings-link"><p>ОБЩЕНИЕ</p><button className={settingsSection === 'Истории' ? 'active' : ''} onClick={() => { setSettingsSection('Истории'); setMobileSettingsOpen(true) }}><CameraIcon /><strong>Истории</strong></button></section>}
       {activeNav === 'Настройки' && <section className="settings-menu notifications-settings-link"><p>ПРИЛОЖЕНИЕ</p><button className={settingsSection === 'Уведомления' ? 'active' : ''} onClick={() => { setSettingsSection('Уведомления'); setMobileSettingsOpen(true) }}><NotificationIcon /><strong>Уведомления</strong></button><button className={settingsSection === 'Оформление' ? 'active' : ''} onClick={() => { setSettingsSection('Оформление'); setMobileSettingsOpen(true) }}><SettingsIcon /><strong>Оформление</strong></button></section>}
-      {activeNav === 'Профиль' && <section className="settings-menu profile-account-menu" onClick={() => setMobileSettingsOpen(true)}><p>АККАУНТ</p><button className={settingsSection === 'Профиль' ? 'active' : ''} onClick={() => setSettingsSection('Профиль')}><ProfileCircleIcon /><strong>Профиль</strong></button><button className={settingsSection === 'Оси' ? 'active' : ''} onClick={() => setSettingsSection('Оси')}><MoneyIcon /><strong>Оси</strong></button><button className={settingsSection === 'Конфиденциальность' ? 'active' : ''} onClick={() => setSettingsSection('Конфиденциальность')}><LockIcon /><strong>Конфиденциальность</strong></button><button className={settingsSection === 'Истории' ? 'active' : ''} onClick={() => { setSettingsSection('Истории'); setMobileSettingsOpen(true) }}><CameraIcon /><strong>Истории</strong></button></section>}
+      {activeNav === 'Профиль' && <section className="settings-menu profile-account-menu" onClick={() => setMobileSettingsOpen(true)}><p>АККАУНТ</p><button className={settingsSection === 'Профиль' ? 'active' : ''} onClick={() => setSettingsSection('Профиль')}><ProfileCircleIcon /><strong>Профиль</strong></button><button className={settingsSection === 'Star' ? 'active' : ''} onClick={() => setSettingsSection('Star')}><StarIcon /><strong>Prime</strong></button><button className={settingsSection === 'Конфиденциальность' ? 'active' : ''} onClick={() => setSettingsSection('Конфиденциальность')}><LockIcon /><strong>Конфиденциальность</strong></button><button className={settingsSection === 'Истории' ? 'active' : ''} onClick={() => { setSettingsSection('Истории'); setMobileSettingsOpen(true) }}><CameraIcon /><strong>Истории</strong></button></section>}
       <nav className="bottom-nav" aria-label="Основная навигация" style={{ '--active-offset': `calc(${navIndex * 100}% + ${navIndex * 6}px)` } as CSSProperties}>
         {[['Чаты', MessageIcon], ['Профиль', ProfileCircleIcon], ['Настройки', SettingsIcon]].map(([label, Icon]) => <button key={label as string} onClick={() => selectNavLabel(label as string)} className={activeNav === label ? 'active' : ''}><Icon /><span>{label as string}</span></button>)}
       </nav>
@@ -2759,23 +3286,28 @@ export default function App() {
       {announcementError && <p className="privacy-error">{announcementError}</p>}
     </section>}
 
-    {!selectedProfile && activeNav === 'Профиль' && <div className="page-view settings-view profile-hub"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К профилю</button>{settingsSection === 'Профиль' && <><p className="eyebrow">АККАУНТ</p><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()}>{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'Настроить фото'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} /></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Оси' && <><p className="eyebrow">ВАЛЮТА</p><h2>Оси</h2><div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Ваш баланс</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><p className="eyebrow">АККАУНТ</p><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Отдельный код только для этого браузера. Он не меняет пароль аккаунта.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6 цифр" /></label><label>Повторите код<input type="password" inputMode="numeric" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : 'Сохранить'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}</div>}
+    {!selectedProfile && activeNav === 'Профиль' && <div className="page-view settings-view profile-hub"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К профилю</button>{settingsSection === 'Профиль' && <><p className="eyebrow">АККАУНТ</p><h2 className="profile-display-title" style={{ color: starProfile?.plan === 'extra' ? starColor : undefined, fontFamily: starProfile?.plan === 'extra' ? starFont === 'serif' ? 'Georgia, serif' : starFont === 'mono' ? 'ui-monospace, monospace' : 'Manrope, Arial, sans-serif' : undefined }}><span className="profile-display-name">{currentDisplayName || currentUsername}</span>{starProfile?.plan && starProfile.plan !== 'light' && <span className="profile-prime-icon" aria-label="Prime">{primeIconOptions.find((option) => option.id === starIcon)?.glyph || '✦'}</span>}<AdminBadge isAdmin={currentIsAdmin} /></h2>
+<p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p>
+<button type="button" className="account-switcher-entry" onClick={() => { setAccountSwitcherError(''); setAccountSwitcherOpen(true) }}><span><strong>Аккаунты</strong><small>{savedAccounts.length}/4 сохранено на этом устройстве</small></span><ArrowRightIcon /></button>
+<form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()}>{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'Настроить фото'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} /></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form><section className="profile-birthday"><h3>День рождения</h3><p>Osirium напомнит друзьям о вашем дне рождения.</p><form className="privacy-form" onSubmit={saveBirthday}><label>Дата рождения<input name="birthday" type="text" inputMode="numeric" value={birthdayValue} onChange={(event) => setBirthdayValue(event.target.value.replace(/[^0-9.]/g, '').slice(0, 10))} placeholder="ДД.ММ или ДД.ММ.ГГГГ" /></label><button className="privacy-save" disabled={starSaving}>Сохранить дату</button></form></section></>}{settingsSection === 'Оси' && <><p className="eyebrow">ВАЛЮТА</p><h2>Оси</h2><div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Ваш баланс</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><p className="eyebrow">АККАУНТ</p><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Отдельный код только для этого браузера. Он не меняет пароль аккаунта.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="6 цифр" /></label><label>Повторите код<input type="password" inputMode="numeric" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : 'Сохранить'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}</div>}
     {!selectedProfile && activeNav === 'Профиль' && settingsSection === 'Истории' && renderProfileStoryPage()}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && currentIsAdmin && <div className="page-view settings-view admin-page"><p className="eyebrow">АДМИНИСТРАТОР</p><h2>Бейджи пользователей</h2><p className="settings-description">Выдавайте роли людям. Белый бейдж администратора назначается только системой и виден только у вас.</p><form className="admin-search-form" onSubmit={searchAdminUsers}><input value={adminSearch} onChange={(event) => setAdminSearch(event.target.value)} placeholder="Найти по username" /><button className="privacy-save" disabled={adminLoading}>{adminLoading ? 'Ищем…' : 'Найти'}</button></form>{adminError && <p className="privacy-error">{adminError}</p>}<div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={profile.id}><span className="avatar" style={{ backgroundColor: profile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(profile.avatar_path) ? <img src={profileAvatarUrl(profile.avatar_path) as string} alt="" /> : initials(profile.display_name || profile.username)}</span><div><strong>{profile.display_name || `@${profile.username}`}<RoleBadge isAdmin={profile.is_admin} badge={profile.badge} /></strong><small>@{profile.username}</small></div><div className="admin-badge-actions"><button className="badge-helper" onClick={() => { void assignBadge(profile, 'helper') }}>Хелпер</button><button className="badge-idea" onClick={() => { void assignBadge(profile, 'idea') }}>Идейник</button><button className="badge-clear" onClick={() => { void assignBadge(profile, null) }}>Снять</button></div></div>)}</div></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Оси' && <div className="page-view settings-view osi-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ВАЛЮТА</p><h2>Оси</h2><div className="osi-balance-card"><img className="osi-symbol" src="/osi-currency-icon.png" alt="" /><div><small>Ваш баланс</small><strong>{currentOsiBalance.toLocaleString('ru-RU')} Оси</strong></div></div><p className="settings-description">Оси — внутренняя валюта Osirium. Пока её нельзя заработать, но баланс уже сохраняется в профиле.</p></div>}
-    {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <div className="page-view settings-view admin-page admin-page-secondary"><p className="eyebrow">ДОСТУП И ВАЛЮТА</p><h2>Блокировка и Оси</h2><p className="settings-description">Выдавайте Оси или блокируйте аккаунты. Заблокированный пользователь не сможет войти и писать сообщения.</p><div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={`controls-${profile.id}`}><div><strong>@{profile.username}</strong><small>{profile.is_banned ? 'Заблокирован' : 'Активен'}</small></div><div className="admin-badge-actions"><input className="osi-amount-input" type="number" min="1" step="1" value={osiAmount} onChange={(event) => setOsiAmount(event.target.value)} aria-label="Количество Оси" /><button className="badge-idea" onClick={() => { void grantOsi(profile) }}>Выдать Оси</button><button className={profile.is_banned ? 'badge-unban' : 'badge-ban'} onClick={() => { void setUserBan(profile, !profile.is_banned) }}>{profile.is_banned ? 'Разблокировать' : 'Заблокировать'}</button></div></div>)}</div></div>}
+    {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <div className="page-view settings-view admin-page admin-page-secondary"><p className="eyebrow">ДОСТУП, ВАЛЮТА И PRIME</p><h2>Блокировка, Оси и Prime</h2><p className="settings-description">Выдавайте Оси, Prime или блокируйте аккаунты. Подарочный Prime выдаётся на 30 дней без списания Осей.</p><div className="admin-results">{adminResults.map((profile) => <div className="admin-user" key={`controls-${profile.id}`}><div><strong>@{profile.username}</strong><small>{profile.is_banned ? 'Заблокирован' : 'Активен'}</small></div><div className="admin-badge-actions"><input className="osi-amount-input" type="number" min="1" step="1" value={osiAmount} onChange={(event) => setOsiAmount(event.target.value)} aria-label="Количество Оси" /><button className="badge-idea" onClick={() => { void grantOsi(profile) }}>Выдать Оси</button><div className="admin-prime-actions"><select value={adminPrimePlan} onChange={(event) => setAdminPrimePlan(event.target.value as 'light' | 'medium' | 'extra')} aria-label="Версия Prime"><option value="light">Prime Light</option><option value="medium">Prime Medium</option><option value="extra">Prime Extra</option></select><button className="admin-prime-grant" disabled={adminPrimeGrantingId === profile.id} onClick={() => { void grantPrimeSubscription(profile) }}>{adminPrimeGrantingId === profile.id ? 'Выдаём…' : 'Подарить Prime'}</button></div><button className={profile.is_banned ? 'badge-unban' : 'badge-ban'} onClick={() => { void setUserBan(profile, !profile.is_banned) }}>{profile.is_banned ? 'Разблокировать' : 'Заблокировать'}</button></div></div>)}</div></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Истории' && <div className="page-view settings-view story-settings-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ИСТОРИИ</p><h2>Поделиться историей</h2><p className="settings-description">Истории видят только люди, с которыми у вас уже есть диалог. Через 24 часа они исчезают.</p><form className="story-form" onSubmit={publishStory}><input ref={storyInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm" onChange={handleStorySelection} /><button type="button" className="story-add" onClick={() => storyInputRef.current?.click()}>Добавить историю</button><label>Размер<select value={storyAspectRatio} onChange={(event) => setStoryAspectRatio(event.target.value)}><option value="9:16">Вертикальный · 9:16</option><option value="1:1">Квадрат · 1:1</option><option value="16:9">Горизонтальный · 16:9</option></select></label>{storyPreviewUrl && <div className={`story-preview ratio-${storyAspectRatio.replace(':', '-')}`}>{storyFile?.type.startsWith('video/') ? <video src={storyPreviewUrl} controls /> : <img src={storyPreviewUrl} alt="Предпросмотр истории" />}{storyOverlayText && <strong>{storyOverlayText}</strong>}</div>}<label>Надпись на истории<input value={storyOverlayText} onChange={(event) => setStoryOverlayText(event.target.value.slice(0, 80))} maxLength={80} placeholder="Например, доброе утро" /></label><label>Описание<textarea value={storyDescription} onChange={(event) => setStoryDescription(event.target.value.slice(0, 180))} maxLength={180} placeholder="Описание истории" /></label><button className="story-publish" disabled={!storyFile || storyUploading}>{storyUploading ? 'Публикуем…' : 'Опубликовать'}</button>{storyError && <p className="privacy-error">{storyError}</p>}</form></div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Уведомления' && <div className="page-view settings-view notifications-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">УВЕДОМЛЕНИЯ</p><h2>Уведомления</h2><p className="settings-description">Подключите уведомления один раз — Osirium сохранит настройку на этом устройстве.</p><ol className="notification-steps"><li><b>iPhone.</b> Откройте Osirium в Safari, добавьте сайт на экран «Домой», затем включите уведомления уже в приложении.</li><li><b>Android.</b> Разрешите уведомления в Chrome или в установленном веб‑приложении.</li><li><b>ПК.</b> Разрешите уведомления для osirium.lol в браузере.</li><li>После включения разрешение и подключение сохраняются для этого устройства.</li></ol>{notificationPermission === 'granted' && <p className="notification-status granted">Уведомления разрешены для этого устройства.</p>}{notificationPermission === 'denied' && <p className="notification-status">Уведомления запрещены. Включите их в настройках браузера или устройства.</p>}{notificationPermission === 'unsupported' && <p className="notification-status">Этот браузер не поддерживает уведомления.</p>}<p className="notification-note">Если кнопка не срабатывает, проверьте разрешение уведомлений в настройках браузера или системы.</p>{notificationPermission === 'default' && <button type="button" className="notification-enable" onClick={() => { void requestNotificationPermission() }}>Включить уведомления</button>}</div>}
     {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Оформление' && <div className="page-view settings-view appearance-page"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">ПРИЛОЖЕНИЕ</p><h2>Оформление</h2><p className="settings-description">Выберите тему, которая будет использоваться на этом устройстве.</p><section className="theme-settings"><strong>Тема</strong><div><button type="button" className={theme === 'dark' ? 'active' : ''} onClick={(event) => switchTheme('dark', event)}>Тёмная</button><button type="button" className={theme === 'light' ? 'active' : ''} onClick={(event) => switchTheme('light', event)}>Белая</button></div></section></div>}
     {mobileSettingsOpen && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <button type="button" className="mobile-admin-return" aria-label="К настройкам" onClick={() => { setSettingsSection('Профиль'); setMobileSettingsOpen(false) }}><ArrowLeftIcon /></button>}
+    {currentIsAdmin && activeNav === 'Настройки' && settingsSection === 'Админ-панель' && <div className="page-view settings-view admin-page admin-page-topups"><p className="eyebrow">ПЛАТЕЖИ</p><h2>Заявки на пополнение</h2><p className="settings-description">Проверяйте перевод в ЮMoney и только после этого подтверждайте начисление.</p><div className="admin-topup-list">{adminTopupsLoading ? <p>Загружаем заявки…</p> : adminTopups.length ? adminTopups.map((topup) => <article className="admin-topup-item" key={topup.id}><div><strong>@{topup.username}</strong><small>{topup.display_name || topup.username} · {new Date(topup.created_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</small><small>Владелец карты: {topup.payer_name}</small></div><b>{Number(topup.osi_amount).toLocaleString('ru-RU')} Оси · {Number(topup.rub_amount).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽</b><div className="admin-topup-actions"><button type="button" className="admin-topup-approve" disabled={adminTopupReviewingId === topup.id} onClick={() => { void reviewOsiTopup(topup, true) }}>{adminTopupReviewingId === topup.id ? 'Проверяем…' : 'Подтвердить'}</button><button type="button" className="admin-topup-reject" disabled={adminTopupReviewingId === topup.id} onClick={() => { void reviewOsiTopup(topup, false) }}>Отклонить</button></div></article>) : <p>Заявок пока нет.</p>}</div></div>}
     <section className={`conversation ${selectedChat ? 'is-open' : ''} ${selectedConversation === favoritesConversationId ? 'favorites' : ''}`}>
       {!selectedProfile && (activeNav === 'Настройки' || activeNav === 'Профиль') && settingsSection === 'Конфиденциальность' && <div className="local-password-page privacy-overview"><button type="button" className="mobile-page-back" onClick={() => { if (activeNav === 'Профиль') setSettingsSection('Профиль'); setMobileSettingsOpen(false) }}>← {activeNav === 'Профиль' ? 'К профилю' : 'К настройкам'}</button><p className="eyebrow">АККАУНТ</p><h2>Конфиденциальность</h2><button type="button" className="local-password-entry" onClick={openLocalPasswordSettings}><span><strong>Локальный пароль</strong><small>{appLockHash ? 'Код установлен на этом устройстве' : 'Защитите вход отдельным кодом'}</small></span><ArrowRightIcon /></button></div>}
       {!selectedProfile && activeNav === 'Настройки' && settingsSection === 'Локальный пароль' && <div className="local-password-page"><button type="button" className="local-password-back" onClick={() => { setPrivacyError(''); setSettingsSection('Конфиденциальность') }}><ArrowLeftIcon /><span>Конфиденциальность</span></button><p className="eyebrow">КОНФИДЕНЦИАЛЬНОСТЬ</p><h2>Локальный пароль</h2><p className="settings-description">Отдельный код только для этого браузера. Он не меняет пароль аккаунта.</p>{appLockHash && !localPasswordAccessGranted ? <form className="privacy-form" onSubmit={verifyLocalPasswordForSettings}><label>Текущий код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={currentLockPassword} onChange={(event) => setCurrentLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="current-password" placeholder="Введите 6 цифр" /></label><button className="privacy-save">Продолжить</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form> : <form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="6 цифр" /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{appLockHash && <button type="button" className="local-password-remove" onClick={removeLocalPassword}>Убрать локальный пароль</button>}{privacyError && <p className="privacy-error">{privacyError}</p>}</form>}</div>}
-      {!selectedProfile && activeNav === 'Чаты' && selectedChat && <header className="mobile-conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="mobile-chat-profile" aria-label={`Открыть профиль ${displayNameFor(selectedChat)}`} onClick={() => { void openProfile(selectedChat) }}><span className="avatar small" style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedChat))}</span><span><strong>{displayNameFor(selectedChat)}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><small className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</small></span></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button></header>}
+      {!selectedProfile && activeNav === 'Чаты' && selectedChat && <header className="mobile-conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="mobile-chat-profile" aria-label={`Открыть профиль ${displayNameFor(selectedChat)}`} onClick={() => { void openProfile(selectedChat) }}><span className="avatar small" style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedChat))}</span><span><strong>{renderPrimeName(selectedChat)}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><small className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</small></span></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button></header>}
       {selectedProfile && <div className="profile-view">
         <button type="button" className="profile-back" aria-label="Назад" onClick={() => { setSelectedProfile(null); setSelectedProfileBio(''); setContactEditorOpen(false) }}><ArrowLeftIcon /></button>
         <span className="avatar profile-large" style={{ backgroundColor: selectedProfile.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedProfile.avatar_path) ? <img src={profileAvatarUrl(selectedProfile.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedProfile))}</span>
-        <h2>{displayNameFor(selectedProfile)}<RoleBadge isAdmin={selectedProfile.is_admin} badge={selectedProfile.badge} /></h2>
+        <h2 className="public-profile-name" style={{ color: selectedProfile.prime_plan === 'extra' ? selectedProfile.nickname_color || undefined : undefined, fontFamily: selectedProfile.prime_plan === 'extra' ? selectedProfile.nickname_font === 'serif' ? 'Georgia, serif' : selectedProfile.nickname_font === 'mono' ? 'ui-monospace, monospace' : 'Manrope, Arial, sans-serif' : undefined }}><span>{displayNameFor(selectedProfile)}</span>{selectedProfile.nickname_icon && <span className="public-profile-prime-icon" aria-label="Prime">{primeIconOptions.find((option) => option.id === selectedProfile.nickname_icon)?.glyph || '✦'}</span>}<RoleBadge isAdmin={selectedProfile.is_admin} badge={selectedProfile.badge} /></h2>
+        {selectedProfile.prime_plan && <p className="profile-prime-owner">Владелец подписки Prime {selectedProfile.prime_plan === 'light' ? 'Light' : selectedProfile.prime_plan === 'medium' ? 'Medium' : 'Extra'}</p>}
         <p className="profile-status">@{selectedProfile.username}</p>
         <div className="profile-info"><span>ОПИСАНИЕ</span><p>{selectedProfileLoading ? 'Загружаем…' : selectedProfileBio || `${displayNameFor(selectedProfile)} ещё не придумал что можно написать в описание ;<`}</p></div>
         <button className="page-action" onClick={() => { void selectChat(selectedProfile) }}>Открыть диалог <ArrowRightIcon /></button>
@@ -2791,10 +3323,10 @@ export default function App() {
         </div>}
       </div>}
       {!selectedProfile && activeNav === 'Чаты' && (selectedChat ? <>
-        <header className="conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button><button type="button" className="avatar small header-avatar" aria-label={`Открыть профиль ${displayNameFor(selectedChat)}`} onClick={() => { void openProfile(selectedChat) }} style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedChat))}</button><div><strong>{displayNameFor(selectedChat)}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><span className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</span></div></header>
+        <header className="conversation-head"><button className="mobile-menu" aria-label="Вернуться к чатам" onClick={() => { setSelectedConversation(null); setMessages([]); setPinnedMessage(null) }}><Menu2Icon /></button><button type="button" className="icon-button call-button" aria-label="Позвонить" onClick={() => { void startCall() }}><CallIcon /></button><button type="button" className="avatar small header-avatar" aria-label={`Открыть профиль ${displayNameFor(selectedChat)}`} onClick={() => { void openProfile(selectedChat) }} style={{ backgroundColor: selectedChat.avatar_color || defaultAvatarColor }}>{profileAvatarUrl(selectedChat.avatar_path) ? <img src={profileAvatarUrl(selectedChat.avatar_path) as string} alt="" /> : initials(displayNameFor(selectedChat))}</button><div><strong>{renderPrimeName(selectedChat)}<RoleBadge isAdmin={selectedChat.is_admin} badge={selectedChat.badge} /></strong><span className={formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since)) === 'в сети' ? 'presence-online' : ''}>{formatPresence(selectedChat.hidden_presence_since || selectedChat.last_seen_at, Boolean(selectedChat.hidden_presence_since))}</span></div></header>
       {selectedChat.blocked_by_other && <div className="system-message"><strong>Ось-Бот</strong><span>Ваши последующие сообщения не будут видны собеседнику, увы он вас заблокировал ;&lt;&lt;</span></div>}
       {pinnedMessage && <button type="button" className="pinned-message" onClick={() => openMessageMenu(pinnedMessage, window.innerWidth / 2, 110)}><strong>Закреплённое сообщение</strong><span>{pinnedMessage.image_path ? 'Фотография' : pinnedMessage.body}</span></button>}
-      {selectedConversation === favoritesConversationId && <label className="favorites-search"><SearchIcon /><input value={favoritesSearch} onChange={(event) => setFavoritesSearch(event.target.value)} placeholder="Поиск в Избранном" /></label>}<div className="messages">{displayedMessages.map((message, index) => <div key={message.id}>{(index === 0 || messageDayKey(displayedMessages[index - 1].created_at) !== messageDayKey(message.created_at)) && <div className="date-label">{messageDateLabel(message.created_at)}</div>}<div className={`bubble-wrap ${message.sender_id === currentUserId ? 'mine' : ''}`} data-message-id={message.id} onContextMenu={(event) => { event.preventDefault(); openMessageMenu(message, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startMessageHold(message, touch.clientX, touch.clientY) }} onTouchMove={clearMessageHold} onTouchEnd={clearMessageHold} onTouchCancel={clearMessageHold}><div className="bubble">{message.forwarded_from_id && <small className="message-forwarded">Пересланное сообщение</small>}{message.reply_to_id && <span className="message-reply">{message.reply_sender_id === currentUserId ? 'Вы' : 'Ответ'} · {message.reply_body || 'Сообщение недоступно'}</span>}{message.image_path && (messageImageUrls[message.id] ? <button type="button" className="message-image-button" aria-label="Открыть фотографию" onClick={() => { resetImageZoom(); setOpenedImage({ src: messageImageUrls[message.id], name: message.image_name || 'Фотография' }) }}><img className={`message-image ${loadedMessageImages[message.id] ? 'is-loaded' : ''}`} src={messageImageUrls[message.id]} alt={message.image_name || 'Фотография'} onLoad={() => setLoadedMessageImages((current) => ({ ...current, [message.id]: true }))} /></button> : <span className="image-loading">Загрузка фото…</span>)}{message.audio_path && (messageImageUrls[message.id] ? <div className="voice-message"><span>Голосовое · {message.audio_duration || 0} сек.</span><audio controls preload="metadata" src={messageImageUrls[message.id]} /></div> : <span className="image-loading">Загрузка голосового…</span>)}{!message.image_path && !message.audio_path && message.body}<time>{formatTime(message.created_at)}{message.edited_at && <span> · изм.</span>}{message.sender_id === currentUserId && message.read_at && <span className="read-receipt" aria-label="Прочитано"><CheckIcon /></span>}</time></div></div></div>)}{chatError && <p className="chat-error">{chatError}</p>}</div>
+      {selectedConversation === favoritesConversationId && <label className="favorites-search"><SearchIcon /><input value={favoritesSearch} onChange={(event) => setFavoritesSearch(event.target.value)} placeholder="Поиск в Избранном" /></label>}<div className="messages">{displayedMessages.map((message, index) => <div key={message.id}>{(index === 0 || messageDayKey(displayedMessages[index - 1].created_at) !== messageDayKey(message.created_at)) && <div className="date-label">{messageDateLabel(message.created_at)}</div>}<div className={`bubble-wrap ${message.sender_id === currentUserId ? 'mine' : ''}`} data-message-id={message.id} onContextMenu={(event) => { event.preventDefault(); openMessageMenu(message, event.clientX, event.clientY) }} onTouchStart={(event) => { const touch = event.touches[0]; startMessageHold(message, touch.clientX, touch.clientY) }} onTouchMove={clearMessageHold} onTouchEnd={clearMessageHold} onTouchCancel={clearMessageHold}><div className="bubble">{message.forwarded_from_id && <small className="message-forwarded">Пересланное сообщение</small>}{message.reply_to_id && <span className="message-reply">{message.reply_sender_id === currentUserId ? 'Вы' : 'Ответ'} · {message.reply_body || 'Сообщение недоступно'}</span>}{message.image_path && (messageImageUrls[message.id] ? <button type="button" className="message-image-button" aria-label="Открыть фотографию" onClick={() => { resetImageZoom(); setOpenedImage({ id: message.id, src: messageImageUrls[message.id], name: message.image_name || 'Фотография' }) }}><img className={`message-image ${loadedMessageImages[message.id] ? 'is-loaded' : ''}`} src={messageImageUrls[message.id]} alt={message.image_name || 'Фотография'} onLoad={() => setLoadedMessageImages((current) => ({ ...current, [message.id]: true }))} /></button> : <span className="image-loading">Загрузка фото…</span>)}{message.audio_path && (messageImageUrls[message.id] ? <div className="voice-message"><span>Голосовое · {message.audio_duration || 0} сек.</span><audio controls preload="metadata" src={messageImageUrls[message.id]} /></div> : <span className="image-loading">Загрузка голосового…</span>)}{!message.image_path && !message.audio_path && message.body}<time>{formatTime(message.created_at)}{message.edited_at && <span> · изм.</span>}{message.sender_id === currentUserId && message.read_at && <span className="read-receipt" aria-label="Прочитано"><CheckIcon /></span>}</time></div></div></div>)}{chatError && <p className="chat-error">{chatError}</p>}</div>
         {voiceLocked && <div className="voice-record-menu">
           <strong>{voicePaused ? 'На паузе' : 'Запись голосового'} · {voiceSeconds} сек.</strong>
           <button type="button" onClick={toggleVoicePause}>{voicePaused ? 'Продолжить' : 'Пауза'}</button>
@@ -2818,7 +3350,9 @@ export default function App() {
       </> : <div className="page-view"><p className="eyebrow">ЛИЧНЫЕ СООБЩЕНИЯ</p><h2>Найдите человека по логину.</h2><p>Введите в поиске слева минимум 3 символа из его @логина — после этого можно начать настоящий диалог.</p></div>)}
       {!selectedProfile && activeNav === 'Главная' && <div className="page-view"><p className="eyebrow">OSIRIUM</p><h2>Ваши сообщения.</h2><p>У вас {chats.length} {chats.length === 1 ? 'диалог' : 'диалогов'}. Используйте поиск, чтобы написать новому человеку.</p><button className="page-action" onClick={() => setActiveNav('Чаты')}>Открыть чаты <ArrowRightIcon /></button></div>}
       {!selectedProfile && activeNav === 'Контакты' && <div className="page-view contacts-view"><p className="eyebrow">ПОИСК ЛЮДЕЙ</p><h2>Контакты по логину</h2><p>Поиск находится слева. Логин доступен в формате @username; в результатах отображаются только подходящие пользователи.</p></div>}
-      {!selectedProfile && activeNav === 'Настройки' && <div className="page-view settings-view"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">НАСТРОЙКИ</p>{settingsSection === 'Профиль' && <><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2><p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><p className="settings-description">Username <b>@{currentUsername}</b> используется для поиска и остаётся отдельным от display-ника.</p><form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()} aria-label="Изменить аватар">{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'JPG, PNG или WebP до 5 МБ'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} placeholder="Как вас будут видеть" /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} placeholder="Расскажите о себе" /><small>{profileBio.length}/160</small></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Это отдельный код только для этого браузера. Он не меняет пароль аккаунта и не покидает устройство.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder={appLockHash ? 'Оставьте пустым, чтобы не менять' : '6 цифр'} /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}{settingsSection === 'Опасная зона' && <section className="danger-zone"><h2>Опасная зона</h2><p>Здесь меняется основной пароль аккаунта — он используется при входе в Osirium.</p><form className="privacy-form" onSubmit={changeAccountPassword}><label>Новый пароль аккаунта<input type="password" value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} autoComplete="new-password" placeholder="Минимум 8 символов" /></label><label>Повторите пароль<input type="password" value={newAccountPasswordRepeat} onChange={(event) => setNewAccountPasswordRepeat(event.target.value)} autoComplete="new-password" placeholder="Повторите пароль" /></label><button className="privacy-save" disabled={accountPasswordSaving}>{accountPasswordSaving ? 'Меняем…' : 'Сменить пароль'}</button>{accountPasswordError && <p className="privacy-error">{accountPasswordError}</p>}</form><button className="logout" onClick={() => { void logout() }}>Выйти из аккаунта</button></section>}</div>}
+      {!selectedProfile && activeNav === 'Настройки' && <div className="page-view settings-view"><button type="button" className="mobile-page-back" onClick={() => setMobileSettingsOpen(false)}>← К настройкам</button><p className="eyebrow">НАСТРОЙКИ</p>{settingsSection === 'Профиль' && <><h2>Профиль<AdminBadge isAdmin={currentIsAdmin} /></h2>
+<p className="profile-public-id">Ваш ID: {formatPublicId(currentPublicId)}</p><p className="settings-description">Username <b>@{currentUsername}</b> используется для поиска и остаётся отдельным от display-ника.</p>
+<form className="profile-form" onSubmit={saveProfile}><input ref={avatarInputRef} className="photo-picker" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleAvatarSelection} /><div className="avatar-editor"><button type="button" className="avatar profile-avatar avatar-upload" onClick={() => avatarInputRef.current?.click()} aria-label="Изменить аватар">{currentAvatarUrl ? <img src={currentAvatarUrl} alt="Ваш аватар" /> : initials(currentDisplayName || currentUsername)}</button><div><strong>Аватар</strong><small>{avatarUploading ? 'Загружаем…' : 'JPG, PNG или WebP до 5 МБ'}</small><button type="button" className="text-button" onClick={() => avatarInputRef.current?.click()}>Изменить фото</button></div></div><label>Display-ник<input value={currentDisplayName} onChange={(event) => setCurrentDisplayName(event.target.value.slice(0, 48))} maxLength={48} placeholder="Как вас будут видеть" /></label><label>Описание<textarea value={profileBio} onChange={(event) => setProfileBio(event.target.value.slice(0, 160))} maxLength={160} placeholder="Расскажите о себе" /><small>{profileBio.length}/160</small></label><button className="privacy-save" disabled={profileSaving}>{profileSaving ? 'Сохраняем…' : 'Сохранить профиль'}</button>{profileError && <p className="privacy-error">{profileError}</p>}</form></>}{settingsSection === 'Конфиденциальность' && <section className="privacy-section"><h2>Конфиденциальность</h2><h3>Локальный пароль</h3><p>Это отдельный код только для этого браузера. Он не меняет пароль аккаунта и не покидает устройство.</p><form className="privacy-form" onSubmit={savePrivacySettings}><label>Код-пароль<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPassword} onChange={(event) => setNewLockPassword(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder={appLockHash ? 'Оставьте пустым, чтобы не менять' : '6 цифр'} /></label><label>Повторите код<input type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={newLockPasswordRepeat} onChange={(event) => setNewLockPasswordRepeat(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="new-password" placeholder="Повторите 6 цифр" /></label><label>Запрашивать пароль через<select value={appLockTimeout} onChange={(event) => setAppLockTimeout(Number(event.target.value))}><option value={60}>1 минуту</option><option value={300}>5 минут</option><option value={900}>15 минут</option><option value={1800}>30 минут</option><option value={3600}>1 час</option></select></label><button className="privacy-save" disabled={privacySaving}>{privacySaving ? 'Сохраняем…' : appLockHash ? 'Сохранить изменения' : 'Включить пароль'}</button>{privacyError && <p className="privacy-error">{privacyError}</p>}</form></section>}{settingsSection === 'Опасная зона' && <section className="danger-zone"><h2>Опасная зона</h2><p>Здесь меняется основной пароль аккаунта — он используется при входе в Osirium.</p><form className="privacy-form" onSubmit={changeAccountPassword}><label>Новый пароль аккаунта<input type="password" value={newAccountPassword} onChange={(event) => setNewAccountPassword(event.target.value)} autoComplete="new-password" placeholder="Минимум 8 символов" /></label><label>Повторите пароль<input type="password" value={newAccountPasswordRepeat} onChange={(event) => setNewAccountPasswordRepeat(event.target.value)} autoComplete="new-password" placeholder="Повторите пароль" /></label><button className="privacy-save" disabled={accountPasswordSaving}>{accountPasswordSaving ? 'Меняем…' : 'Сменить пароль'}</button>{accountPasswordError && <p className="privacy-error">{accountPasswordError}</p>}</form><button className="logout" onClick={() => { void logout() }}>Выйти из аккаунта</button></section>}</div>}
     </section>
 
     <audio ref={remoteAudioRef} autoPlay playsInline />
@@ -2836,10 +3370,11 @@ export default function App() {
           <div className="screen-share-toolbar">
             <div className="screen-share-switcher">
               {callScreenSharing && <button type="button" className={screenShareView === 'local' ? 'active' : ''} onClick={() => setScreenShareView('local')}>Ваша демонстрация</button>}
-              {remoteScreenSharing && <button type="button" className={screenShareView === 'remote' ? 'active' : ''} onClick={() => setScreenShareView('remote')}>{displayNameFor(callTarget)}</button>}
+              {remoteScreenSharing && <button type="button" className={screenShareView === 'remote' ? 'active' : ''} onClick={() => setScreenShareView('remote')}>{displayNameFor(callTarget)} · экран</button>}
             </div>
             <button type="button" className="screen-share-fullscreen" aria-label="Открыть демонстрацию на весь экран" onClick={() => { void openScreenShareFullscreen() }}><MaximizeIcon /></button>
           </div>
+          <p className="screen-share-owner">{screenShareView === 'local' ? 'Ваша демонстрация экрана' : `${displayNameFor(callTarget)} демонстрирует экран`}</p>
           <div className="screen-share-canvas">
             <video ref={localScreenVideoRef} className={screenShareView === 'local' && callScreenSharing ? 'is-visible' : ''} autoPlay playsInline muted />
             <video ref={remoteScreenVideoRef} className={screenShareView === 'remote' && remoteScreenSharing ? 'is-visible' : ''} autoPlay playsInline muted />
@@ -2876,7 +3411,7 @@ export default function App() {
       </div>
     </div>}
 
-    {chatMenu && <div className="message-menu-layer" onClick={() => setChatMenu(null)}><div className="message-menu chat-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(event) => event.stopPropagation()}>{chatMenu.mode === 'actions' ? <><button onClick={() => { void toggleChatPin(chatMenu.chat) }}>{chatMenu.chat.is_pinned ? 'Открепить чат' : 'Закрепить чат'}</button><button onClick={() => { void toggleChatMute(chatMenu.chat) }}>{chatMenu.chat.is_muted ? 'Включить звук' : 'Без звука'}</button>{chatMenu.chat.is_blocked ? <button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false, false) }}>Разблокировать</button> : <button className="message-menu-danger" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'block' } : null)}>Заблокировать</button>}</> : <><p>Заблокировать пользователя</p><button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false) }}>Заблокировать</button><button onClick={() => { void setChatBlock(chatMenu.chat, true) }}>Заблокировать скрытно</button><button className="message-menu-back" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
+    {chatMenu && <div className="message-menu-layer" onClick={() => setChatMenu(null)}><div className="message-menu chat-menu" style={{ left: chatMenu.x, top: chatMenu.y }} onClick={(event) => event.stopPropagation()}>{chatMenu.mode === 'actions' ? <><button onClick={() => { void toggleChatPin(chatMenu.chat) }}>{chatMenu.chat.is_pinned ? 'Открепить чат' : 'Закрепить чат'}</button><button onClick={() => { void toggleChatMute(chatMenu.chat) }}>{chatMenu.chat.is_muted ? 'Включить звук' : 'Без звука'}</button>{chatMenu.chat.is_blocked ? <button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false, false) }}>Разблокировать</button> : <button className="message-menu-danger" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'block' } : null)}>Заблокировать</button>}<button className="message-menu-danger" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'delete' } : null)}>Удалить диалог</button></> : chatMenu.mode === 'block' ? <><p>Заблокировать пользователя</p><button className="message-menu-danger" onClick={() => { void setChatBlock(chatMenu.chat, false) }}>Заблокировать</button><button onClick={() => { void setChatBlock(chatMenu.chat, true) }}>Заблокировать скрытно</button><button className="message-menu-back" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></> : <><p>Удалить диалог</p><button className="message-menu-danger" onClick={() => { void deleteChatForEveryone(chatMenu.chat) }}>Удалить у всех</button><button onClick={() => { void deleteChatForMe(chatMenu.chat) }}>Удалить у меня</button><button className="message-menu-back" onClick={() => setChatMenu((current) => current ? { ...current, mode: 'actions' } : null)}>Назад</button></>}</div></div>}
     {messageMenu && <div className="message-menu-layer" onClick={() => setMessageMenu(null)}>
       <div className="message-menu" style={{ left: messageMenu.x, top: messageMenu.y }} onClick={(event) => event.stopPropagation()}>
         {messageMenu.mode === 'actions' ? <>
@@ -2896,7 +3431,7 @@ export default function App() {
       </div>
     </div>}
     {forwardingMessage && <div className="forward-overlay" onClick={() => setForwardingMessage(null)}><section className="forward-sheet" onClick={(event) => event.stopPropagation()}><h3>Переслать сообщение</h3>{favoriteChat && <button onClick={() => { void forwardMessage(favoriteChat) }}>★ Избранное</button>}{chats.map((chat) => <button key={chat.conversation_id} onClick={() => { void forwardMessage(chat) }}>{chat.display_name || `@${chat.username}`}</button>)}</section></div>}
-    {openedImage && <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Просмотр фотографии" onClick={() => setOpenedImage(null)}><button type="button" className="image-viewer-close" aria-label="Закрыть фотографию" onClick={() => setOpenedImage(null)}>×</button><img className="image-viewer-photo" src={openedImage.src} alt={openedImage.name} style={{ transform: `scale(${imageScale})` }} onWheel={handleImageWheel} onTouchStart={handleImageTouchStart} onTouchMove={handleImageTouchMove} onTouchEnd={() => { imagePinchRef.current = null }} onDoubleClick={resetImageZoom} onClick={(event) => event.stopPropagation()} /><span>{openedImage.name}</span></div>}
+    {openedImage && <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Просмотр фотографии" onClick={() => setOpenedImage(null)}><button type="button" className="image-viewer-close" aria-label="Закрыть фотографию" onClick={() => setOpenedImage(null)}>×</button><button type="button" className="image-viewer-step image-viewer-step-previous" aria-label="Предыдущее фото" disabled={chatImages.findIndex((image) => image.id === openedImage.id) <= 0} onClick={(event) => { event.stopPropagation(); moveOpenedImage(-1) }}><ArrowLeftIcon /></button><img className="image-viewer-photo" src={openedImage.src} alt={openedImage.name} style={{ transform: `scale(${imageScale})` }} onWheel={handleImageWheel} onTouchStart={handleImageTouchStart} onTouchMove={handleImageTouchMove} onTouchEnd={handleImageTouchEnd} onDoubleClick={resetImageZoom} onClick={(event) => event.stopPropagation()} /><button type="button" className="image-viewer-step image-viewer-step-next" aria-label="Следующее фото" disabled={chatImages.findIndex((image) => image.id === openedImage.id) >= chatImages.length - 1} onClick={(event) => { event.stopPropagation(); moveOpenedImage(1) }}><ArrowRightIcon /></button><span>{openedImage.name}{chatImages.length > 1 ? ` · ${chatImages.findIndex((image) => image.id === openedImage.id) + 1}/${chatImages.length}` : ''}</span></div>}
     {appLocked && <div className="app-lock-overlay" role="dialog" aria-modal="true" aria-label="Osirium заблокирован"><form className="app-lock-card" onSubmit={unlockApp}><h2>Введите код</h2><p>Osirium был заблокирован после периода бездействия.</p><input autoFocus type="password" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={lockAttempt} onChange={(event) => setLockAttempt(event.target.value.replace(/\D/g, '').slice(0, 6))} autoComplete="current-password" placeholder="6 цифр" /><button>Разблокировать</button>{lockError && <span className="app-lock-error">{lockError}</span>}</form></div>}
     {!appBooting && showWelcome && !authenticated && <div className="welcome-overlay"><div className="welcome-card"><div className="welcome-logo"><span>o</span></div><p className="eyebrow">OSIRIUM</p><h2>{authMode === 'login' ? <>С возвращением<br />в Osirium</> : <>Создайте<br />свой Osirium</>}</h2><p>{authMode === 'login' ? 'Войдите, чтобы продолжить.' : 'Свобода начинается с имени.'}</p><form onSubmit={authenticate} className="auth-form"><label>Логин<input autoFocus value={username} onChange={(event) => setUsername(event.target.value.replace(/[^a-zA-Z0-9_]/g, ''))} autoComplete="username" placeholder="osirium_user" /></label><label>Пароль<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} placeholder="Минимум 8 символов" /></label><button disabled={authLoading}>{authLoading ? 'Подождите…' : authMode === 'login' ? 'Войти' : 'Создать аккаунт'}</button></form><button className="auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError('') }}>{authMode === 'login' ? 'Нет аккаунта? Создать' : 'Уже есть аккаунт? Войти'}</button>{authError && <p className="auth-error">{authError}</p>}</div></div>}
     {avatarCropUrl && <div className="avatar-crop-overlay" role="dialog" aria-modal="true"><div className="avatar-crop-card"><h2>Настроить аватар</h2><p>Перетаскивай фото, масштабируй колесом или ползунком.</p><div className="avatar-crop-frame" onWheel={(event) => { event.preventDefault(); setAvatarCropZoom((value) => Math.max(1, Math.min(3, value - event.deltaY * .001))) }} onPointerDown={(event) => { avatarCropDragRef.current = { x: event.clientX, y: event.clientY, offsetX: avatarCropOffset.x, offsetY: avatarCropOffset.y }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { const drag = avatarCropDragRef.current; if (drag) setAvatarCropOffset({ x: drag.offsetX + event.clientX - drag.x, y: drag.offsetY + event.clientY - drag.y }) }} onPointerUp={() => { avatarCropDragRef.current = null }}><img src={avatarCropUrl} alt="Настройка аватара" style={{ transform: `translate(${avatarCropOffset.x}px, ${avatarCropOffset.y}px) scale(${avatarCropZoom})` }} /></div><label className="avatar-crop-zoom">Масштаб<input type="range" min="1" max="3" step="0.01" value={avatarCropZoom} onChange={(event) => setAvatarCropZoom(Number(event.target.value))} /></label>{avatarCropFile?.type === 'image/gif' && <small>GIF сохранится анимированным; для него используется исходный кадр без обрезки.</small>}<div><button type="button" className="avatar-crop-cancel" onClick={() => { if (avatarCropUrl) URL.revokeObjectURL(avatarCropUrl); setAvatarCropUrl(null); setAvatarCropFile(null) }}>Отмена</button><button type="button" className="avatar-crop-save" onClick={() => { void saveAvatarCrop() }} disabled={avatarUploading}>{avatarUploading ? 'Сохраняем…' : 'Сохранить аватар'}</button></div></div></div>}
